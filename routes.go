@@ -51,6 +51,7 @@ import (
 //	400: badReq
 //	204: noContent
 func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
+	log.Printf("DZK in V1 createSubscription")
 	defer r.Body.Close()
 	var response *http.Response
 	bodyBytes, err := io.ReadAll(r.Body)

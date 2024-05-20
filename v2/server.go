@@ -32,6 +32,7 @@ import (
 	"github.com/redhat-cne/sdk-go/pkg/pubsub"
 	"github.com/redhat-cne/sdk-go/pkg/types"
 	pubsubv1 "github.com/redhat-cne/sdk-go/v1/pubsub"
+	subscriberApi "github.com/redhat-cne/sdk-go/v1/subscriber"
 
 	"io"
 	"net/http"
@@ -62,13 +63,14 @@ const (
 type Server struct {
 	port    int
 	apiPath string
-	//data out is amqp in channel
-	dataOut    chan<- *channel.DataChan
-	closeCh    <-chan struct{}
-	HTTPClient *http.Client
-	httpServer *http.Server
-	pubSubAPI  *pubsubv1.API
-	status     serverStatus
+	//use dataOut chanel to write to configMap
+	dataOut       chan<- *channel.DataChan
+	closeCh       <-chan struct{}
+	HTTPClient    *http.Client
+	httpServer    *http.Server
+	pubSubAPI     *pubsubv1.API
+	subscriberAPI *subscriberApi.API
+	status        serverStatus
 }
 
 // publisher/subscription data model
@@ -130,7 +132,8 @@ func InitServer(port int, apiPath, storePath string, dataOut chan<- *channel.Dat
 				},
 				Timeout: 10 * time.Second,
 			},
-			pubSubAPI: pubsubv1.GetAPIInstance(storePath),
+			pubSubAPI:     pubsubv1.GetAPIInstance(storePath),
+			subscriberAPI: subscriberApi.GetAPIInstance(storePath),
 		}
 	})
 	// singleton
@@ -187,6 +190,7 @@ func (s *Server) GetHostPath() *types.URI {
 
 // Start will start res routes service
 func (s *Server) Start() {
+	log.Infof("DZK starting V2 REST server at port %d", s.port)
 	if s.status == started || s.status == starting {
 		log.Infof("Server is already running at port %d", s.port)
 		return
@@ -335,6 +339,7 @@ func (s *Server) Start() {
 	})
 
 	log.Info("starting rest api server")
+	log.Info("DZK V2 starting rest api server")
 	log.Infof("endpoint %s", s.apiPath)
 	go wait.Until(func() {
 		s.status = started

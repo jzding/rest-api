@@ -27,6 +27,7 @@ import (
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	ce "github.com/cloudevents/sdk-go/v2/event"
+	"github.com/redhat-cne/sdk-go/pkg/subscriber"
 
 	cne "github.com/redhat-cne/sdk-go/pkg/event"
 	"github.com/redhat-cne/sdk-go/pkg/pubsub"
@@ -51,6 +52,8 @@ import (
 //	400: badReq
 //	204: noContent
 func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
+	log.Printf("DZK in V2 createSubscription")
+	log.Printf("DZK createSubscription request r.Header=%v, r.Host=%s, r.URL=%v, r.URL.Host=%s, r.RemoteAddr=%s, r.RequestURI=%s", r.Header, r.Host, r.URL, r.URL.Host, r.RemoteAddr, r.RequestURI)
 	defer r.Body.Close()
 	var response *http.Response
 	bodyBytes, err := io.ReadAll(r.Body)
@@ -64,7 +67,10 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
 		localmetrics.UpdateSubscriptionCount(localmetrics.FAILCREATE, 1)
 		return
 	}
-	if sub.GetEndpointURI() != "" {
+	log.Printf("DZK subscription 1 sub=%v", sub)
+	endPointURI := sub.GetEndpointURI()
+	log.Printf("DZK subscription 1.1 endPointURI=%s", endPointURI)
+	if endPointURI != "" {
 		response, err = s.HTTPClient.Post(sub.GetEndpointURI(), cloudevents.ApplicationJSON, nil)
 		if err != nil {
 			log.Printf("there was error validating endpointurl %v, subscription wont be created", err)
@@ -81,8 +87,11 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// check sub.EndpointURI by get
-	sub.SetID(uuid.New().String())
+	id := uuid.New().String()
+	sub.SetID(id)
 	_ = sub.SetURILocation(fmt.Sprintf("http://localhost:%d%s%s/%s", s.port, s.apiPath, "subscriptions", sub.ID)) //nolint:errcheck
+
+	log.Printf("DZK subscription 2 sub=%v", sub)
 
 	newSub, err := s.pubSubAPI.CreateSubscription(sub)
 	if err != nil {
@@ -92,10 +101,49 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("subscription created successfully.")
-	// go ahead and create QDR to this address
-	s.sendOut(channel.SUBSCRIBER, &newSub)
-	localmetrics.UpdateSubscriptionCount(localmetrics.ACTIVE, 1)
-	respondWithJSON(w, http.StatusCreated, newSub)
+
+	addr := newSub.GetResource()
+	// create unique clientId for each subscription based on endPointURI
+	subs := subscriber.New(s.getClientIDFromURI(endPointURI))
+
+	_ = subs.SetEndPointURI(endPointURI)
+
+	// create a subscriber model
+	//	subs.AddSubscription(newSub)
+	subs.AddSubscription(newSub)
+	subs.Action = channel.NEW
+	log.Printf("DZK subscription 3 subs=%v", subs)
+
+	cevent, _ := subs.CreateCloudEvents()
+	cevent.SetSubject(channel.NEW.String())
+	cevent.SetSource(addr)
+
+	out := channel.DataChan{
+		Address: addr,
+		Data:    cevent,
+		Status:  channel.NEW,
+		Type:    channel.SUBSCRIBER,
+	}
+
+	var updatedObj *subscriber.Subscriber
+	// writes a file <clientID>.json that has the same content as configMap.
+	// configMap was created later as a way to persist the data.
+	if updatedObj, err = s.subscriberAPI.CreateSubscription(subs.ClientID, *subs); err != nil {
+		log.Printf("failed creating subscription for %s", subs.ClientID.String())
+		out.Status = channel.FAILED
+	} else {
+		out.Status = channel.SUCCESS
+		_ = out.Data.SetData(cloudevents.ApplicationJSON, updatedObj)
+		log.Printf("DZK subscription 4 out.Data=%v", out.Data)
+		// TODO: this function is in sdk-go
+		// localmetrics.UpdateSenderCreatedCount(obj.ClientID.String(), localmetrics.ACTIVE, 1)
+
+		log.Printf("subscription created successfully.")
+		localmetrics.UpdateSubscriptionCount(localmetrics.ACTIVE, 1)
+		respondWithJSON(w, http.StatusCreated, newSub)
+	}
+
+	s.dataOut <- &out
 }
 
 // createPublisher create publisher and send it to a channel that is shared by middleware to process
@@ -325,6 +373,8 @@ func (s *Server) publishEvent(w http.ResponseWriter, r *http.Request) {
 
 // getCurrentState get current status of the  events that are subscribed to
 func (s *Server) getCurrentState(w http.ResponseWriter, r *http.Request) {
+	log.Printf("DZK getCurrentState request r.Header=%v, r.Host=%s, r.URL=%v, r.URL.Host=%s, r.RemoteAddr=%s, r.RequestURI=%s", r.Header, r.Host, r.URL, r.URL.Host, r.RemoteAddr, r.RequestURI)
+	//s.getClientIDFromURI(endPointURI)
 	queries := mux.Vars(r)
 	resourceAddress, ok := queries["resourceAddress"]
 	if !ok {
@@ -332,12 +382,15 @@ func (s *Server) getCurrentState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("DZK num of subscriptions=%d, num of publishers=%d", len(s.pubSubAPI.GetSubscriptions()), len(s.pubSubAPI.GetPublishers()))
+
 	//identify publisher or subscriber is asking for status
 	var sub *pubsub.PubSub
 	if len(s.pubSubAPI.GetSubscriptions()) > 0 {
 		for _, subscriptions := range s.pubSubAPI.GetSubscriptions() {
 			if strings.Contains(subscriptions.GetResource(), resourceAddress) {
 				sub = subscriptions
+				log.Printf("DZK found subscription %v", sub)
 				break
 			}
 		}
@@ -345,6 +398,7 @@ func (s *Server) getCurrentState(w http.ResponseWriter, r *http.Request) {
 		for _, publishers := range s.pubSubAPI.GetPublishers() {
 			if strings.Contains(publishers.GetResource(), resourceAddress) {
 				sub = publishers
+				log.Printf("DZK found publisher %v", sub)
 				break
 			}
 		}
@@ -369,29 +423,89 @@ func (s *Server) getCurrentState(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		respondWithError(w, err.Error())
-	} else {
-		// for http you send to the protocol address
-		statusChannel := make(chan *channel.StatusChan, 1)
-		s.dataOut <- &channel.DataChan{
-			Type:       channel.STATUS,
-			Data:       ceEvent,
-			Address:    sub.GetResource(),
-			StatusChan: statusChannel,
-		}
-		select {
-		case d := <-statusChannel:
-			if d.Data == nil || d.StatusCode != http.StatusOK {
-				if string(d.Message) == "" {
-					d.Message = []byte("event not found")
-				}
-				respondWithError(w, string(d.Message))
-			} else {
-				respondWithJSON(w, d.StatusCode, *d.Data)
+		return
+	}
+
+	// params := mux.Vars(req)
+	// clientID := params["clientID"]
+	// resource := params["resourceAddress"]
+	// clientUUID, parseError := uuid.Parse(clientID)
+
+	// if parseError != nil || (resource == "" && clientID == "") {
+	// 	_ = json.NewEncoder(w).Encode(map[string]string{"message": "validation failed, resource or clientID is empty"})
+	// }
+
+	// if !strings.HasPrefix(resource, "/") {
+	// 	resource = fmt.Sprintf("/%s", resource)
+	// }
+	// // this is placeholder not sending back to report
+	// out := channel.DataChan{
+	// 	Address:  resource,
+	// 	ClientID: clientUUID,
+	// 	Status:   channel.NEW,
+	// 	Type:     channel.STATUS, // could be new event of new subscriber (sender)
+	// }
+	// // validate client has the subscription for the resource
+	// if _, sub := h.subscriberAPI.HasClient(clientUUID); !sub {
+	// 	out.Status = channel.FAILED
+	// 	localmetrics.UpdateStatusCheckCount(out.Address, localmetrics.FAILED, 1)
+	// 	w.WriteHeader(http.StatusBadRequest)
+	// 	_ = json.NewEncoder(w).Encode(map[string]string{"message": fmt.Sprintf("client is not registered with the event publisher %s ", h.ServiceName)})
+	// } else if _, ok := h.subscriberAPI.HasSubscription(clientUUID, resource); !ok {
+	// 	out.Status = channel.FAILED
+	// 	localmetrics.UpdateStatusCheckCount(out.Address, localmetrics.FAILED, 1)
+	// 	w.WriteHeader(http.StatusBadRequest)
+	// 	_ = json.NewEncoder(w).Encode(map[string]string{"message": fmt.Sprintf("subscription for (%s) not found for the requesting client %s", resource, clientID)})
+	// } else {
+	// 	e, _ := out.CreateCloudEvents(CURRENTSTATE)
+	// 	e.SetSource(resource)
+	// 	// statusReceiveOverrideFn must return value for
+	// 	if h.statusReceiveOverrideFn != nil {
+	// 		if statusErr := h.statusReceiveOverrideFn(*e, &out); statusErr != nil {
+	// 			out.Status = channel.FAILED
+	// 			//out.Data here has the event to be published send it back
+	// 			localmetrics.UpdateStatusCheckCount(out.Address, localmetrics.FAILED, 1)
+	// 			w.WriteHeader(http.StatusBadRequest)
+	// 			_ = json.NewEncoder(w).Encode(map[string]string{"message": statusErr.Error()})
+	// 		} else if out.Data != nil {
+	// 			localmetrics.UpdateStatusCheckCount(out.Address, localmetrics.SUCCESS, 1)
+	// 			out.Status = channel.SUCCESS
+	// 			w.Header().Set("Content-Type", "application/json")
+	// 			w.WriteHeader(http.StatusOK)
+	// 			_ = json.NewEncoder(w).Encode(*out.Data)
+	// 		} else {
+	// 			out.Status = channel.FAILED
+	// 			w.WriteHeader(http.StatusBadRequest)
+	// 			_ = json.NewEncoder(w).Encode(map[string]string{"message": "resource not found"})
+	// 		}
+	// 	} else {
+	// 		out.Status = channel.FAILED
+	// 		w.WriteHeader(http.StatusBadRequest)
+	// 		_ = json.NewEncoder(w).Encode(map[string]string{"message": "onReceive function not defined"})
+	// 	}
+	// }
+
+	// for http you send to the protocol address
+	statusChannel := make(chan *channel.StatusChan, 1)
+	s.dataOut <- &channel.DataChan{
+		Type:       channel.STATUS,
+		Data:       ceEvent,
+		Address:    sub.GetResource(),
+		StatusChan: statusChannel,
+	}
+	select {
+	case d := <-statusChannel:
+		if d.Data == nil || d.StatusCode != http.StatusOK {
+			if string(d.Message) == "" {
+				d.Message = []byte("event not found")
 			}
-		case <-time.After(5 * time.Second):
-			close(statusChannel)
-			respondWithError(w, "timeout waiting for status")
+			respondWithError(w, string(d.Message))
+		} else {
+			respondWithJSON(w, d.StatusCode, *d.Data)
 		}
+	case <-time.After(5 * time.Second):
+		close(statusChannel)
+		respondWithError(w, "timeout waiting for status")
 	}
 }
 
@@ -447,6 +561,10 @@ func (s *Server) logEvent(w http.ResponseWriter, r *http.Request) {
 	} // check if publisher is found
 	log.Printf("event received %v", cneEvent)
 	respondWithMessage(w, http.StatusAccepted, "Event published to log")
+}
+
+func (s *Server) getClientIDFromURI(uri string) uuid.UUID {
+	return uuid.NewMD5(uuid.NameSpaceURL, []byte(uri))
 }
 
 func dummy(w http.ResponseWriter, _ *http.Request) {

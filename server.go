@@ -187,6 +187,7 @@ func (s *Server) GetHostPath() *types.URI {
 
 // Start will start res routes service
 func (s *Server) Start() {
+	log.Infof("DZK starting V1 REST server at port %d", s.port)
 	if s.status == started || s.status == starting {
 		log.Infof("Server is already running at port %d", s.port)
 		return

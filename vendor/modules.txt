@@ -48,6 +48,9 @@ github.com/modern-go/concurrent
 # github.com/modern-go/reflect2 v1.0.2
 ## explicit; go 1.12
 github.com/modern-go/reflect2
+# github.com/pkg/errors v0.9.1
+## explicit
+github.com/pkg/errors
 # github.com/pmezard/go-difflib v1.0.0
 ## explicit
 github.com/pmezard/go-difflib/difflib
@@ -68,7 +71,7 @@ github.com/prometheus/common/model
 github.com/prometheus/procfs
 github.com/prometheus/procfs/internal/fs
 github.com/prometheus/procfs/internal/util
-# github.com/redhat-cne/sdk-go v0.1.1-0.20240321130308-a635605654ab
+# github.com/redhat-cne/sdk-go v0.0.0-unpublished => ../sdk-go
 ## explicit; go 1.21
 github.com/redhat-cne/sdk-go/pkg/channel
 github.com/redhat-cne/sdk-go/pkg/event
@@ -76,11 +79,14 @@ github.com/redhat-cne/sdk-go/pkg/event/ptp
 github.com/redhat-cne/sdk-go/pkg/event/redfish
 github.com/redhat-cne/sdk-go/pkg/pubsub
 github.com/redhat-cne/sdk-go/pkg/store
+github.com/redhat-cne/sdk-go/pkg/store/subscriber
+github.com/redhat-cne/sdk-go/pkg/subscriber
 github.com/redhat-cne/sdk-go/pkg/types
 github.com/redhat-cne/sdk-go/pkg/util/clock
 github.com/redhat-cne/sdk-go/pkg/util/wait
 github.com/redhat-cne/sdk-go/v1/event
 github.com/redhat-cne/sdk-go/v1/pubsub
+github.com/redhat-cne/sdk-go/v1/subscriber
 # github.com/rogpeppe/go-internal v1.10.0
 ## explicit; go 1.19
 # github.com/sirupsen/logrus v1.8.1
