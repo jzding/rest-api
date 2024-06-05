@@ -52,8 +52,6 @@ import (
 //	400: badReq
 //	204: noContent
 func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
-	log.Printf("DZK in V2 createSubscription")
-	log.Printf("DZK createSubscription request r.Header=%v, r.Host=%s, r.URL=%v, r.URL.Host=%s, r.RemoteAddr=%s, r.RequestURI=%s", r.Header, r.Host, r.URL, r.URL.Host, r.RemoteAddr, r.RequestURI)
 	defer r.Body.Close()
 	var response *http.Response
 	bodyBytes, err := io.ReadAll(r.Body)
@@ -373,8 +371,6 @@ func (s *Server) publishEvent(w http.ResponseWriter, r *http.Request) {
 
 // getCurrentState get current status of the  events that are subscribed to
 func (s *Server) getCurrentState(w http.ResponseWriter, r *http.Request) {
-	log.Printf("DZK getCurrentState request r.Header=%v, r.Host=%s, r.URL=%v, r.URL.Host=%s, r.RemoteAddr=%s, r.RequestURI=%s", r.Header, r.Host, r.URL, r.URL.Host, r.RemoteAddr, r.RequestURI)
-	//s.getClientIDFromURI(endPointURI)
 	queries := mux.Vars(r)
 	resourceAddress, ok := queries["resourceAddress"]
 	if !ok {
@@ -411,101 +407,40 @@ func (s *Server) getCurrentState(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, "subscription not found")
 		return
 	}
-	cneEvent := event.CloudNativeEvent()
-	cneEvent.SetID(sub.ID)
-	cneEvent.Type = channel.STATUS.String()
-	cneEvent.SetTime(types.Timestamp{Time: time.Now().UTC()}.Time)
-	cneEvent.SetDataContentType(cloudevents.ApplicationJSON)
-	cneEvent.SetData(cne.Data{
-		Version: "v1",
-	})
-	ceEvent, err := cneEvent.NewCloudEvent(sub)
 
-	if err != nil {
-		respondWithError(w, err.Error())
-		return
+	if resourceAddress == "" {
+		_ = json.NewEncoder(w).Encode(map[string]string{"message": "validation failed, resource is empty"})
 	}
 
-	// params := mux.Vars(req)
-	// clientID := params["clientID"]
-	// resource := params["resourceAddress"]
-	// clientUUID, parseError := uuid.Parse(clientID)
-
-	// if parseError != nil || (resource == "" && clientID == "") {
-	// 	_ = json.NewEncoder(w).Encode(map[string]string{"message": "validation failed, resource or clientID is empty"})
-	// }
-
-	// if !strings.HasPrefix(resource, "/") {
-	// 	resource = fmt.Sprintf("/%s", resource)
-	// }
-	// // this is placeholder not sending back to report
-	// out := channel.DataChan{
-	// 	Address:  resource,
-	// 	ClientID: clientUUID,
-	// 	Status:   channel.NEW,
-	// 	Type:     channel.STATUS, // could be new event of new subscriber (sender)
-	// }
-	// // validate client has the subscription for the resource
-	// if _, sub := h.subscriberAPI.HasClient(clientUUID); !sub {
-	// 	out.Status = channel.FAILED
-	// 	localmetrics.UpdateStatusCheckCount(out.Address, localmetrics.FAILED, 1)
-	// 	w.WriteHeader(http.StatusBadRequest)
-	// 	_ = json.NewEncoder(w).Encode(map[string]string{"message": fmt.Sprintf("client is not registered with the event publisher %s ", h.ServiceName)})
-	// } else if _, ok := h.subscriberAPI.HasSubscription(clientUUID, resource); !ok {
-	// 	out.Status = channel.FAILED
-	// 	localmetrics.UpdateStatusCheckCount(out.Address, localmetrics.FAILED, 1)
-	// 	w.WriteHeader(http.StatusBadRequest)
-	// 	_ = json.NewEncoder(w).Encode(map[string]string{"message": fmt.Sprintf("subscription for (%s) not found for the requesting client %s", resource, clientID)})
-	// } else {
-	// 	e, _ := out.CreateCloudEvents(CURRENTSTATE)
-	// 	e.SetSource(resource)
-	// 	// statusReceiveOverrideFn must return value for
-	// 	if h.statusReceiveOverrideFn != nil {
-	// 		if statusErr := h.statusReceiveOverrideFn(*e, &out); statusErr != nil {
-	// 			out.Status = channel.FAILED
-	// 			//out.Data here has the event to be published send it back
-	// 			localmetrics.UpdateStatusCheckCount(out.Address, localmetrics.FAILED, 1)
-	// 			w.WriteHeader(http.StatusBadRequest)
-	// 			_ = json.NewEncoder(w).Encode(map[string]string{"message": statusErr.Error()})
-	// 		} else if out.Data != nil {
-	// 			localmetrics.UpdateStatusCheckCount(out.Address, localmetrics.SUCCESS, 1)
-	// 			out.Status = channel.SUCCESS
-	// 			w.Header().Set("Content-Type", "application/json")
-	// 			w.WriteHeader(http.StatusOK)
-	// 			_ = json.NewEncoder(w).Encode(*out.Data)
-	// 		} else {
-	// 			out.Status = channel.FAILED
-	// 			w.WriteHeader(http.StatusBadRequest)
-	// 			_ = json.NewEncoder(w).Encode(map[string]string{"message": "resource not found"})
-	// 		}
-	// 	} else {
-	// 		out.Status = channel.FAILED
-	// 		w.WriteHeader(http.StatusBadRequest)
-	// 		_ = json.NewEncoder(w).Encode(map[string]string{"message": "onReceive function not defined"})
-	// 	}
-	// }
-
-	// for http you send to the protocol address
-	statusChannel := make(chan *channel.StatusChan, 1)
-	s.dataOut <- &channel.DataChan{
-		Type:       channel.STATUS,
-		Data:       ceEvent,
-		Address:    sub.GetResource(),
-		StatusChan: statusChannel,
+	if !strings.HasPrefix(resourceAddress, "/") {
+		resourceAddress = fmt.Sprintf("/%s", resourceAddress)
 	}
-	select {
-	case d := <-statusChannel:
-		if d.Data == nil || d.StatusCode != http.StatusOK {
-			if string(d.Message) == "" {
-				d.Message = []byte("event not found")
-			}
-			respondWithError(w, string(d.Message))
+	// this is placeholder not sending back to report
+	out := channel.DataChan{
+		Address: resourceAddress,
+		// ClientID is not used
+		ClientID: uuid.New(),
+		Status:   channel.NEW,
+		Type:     channel.STATUS, // could be new event of new subscriber (sender)
+	}
+
+	e, _ := out.CreateCloudEvents(CURRENTSTATE)
+	e.SetSource(resourceAddress)
+	// statusReceiveOverrideFn must return value for
+	if s.statusReceiveOverrideFn != nil {
+		if statusErr := s.statusReceiveOverrideFn(*e, &out); statusErr != nil {
+			log.Printf("DZK getCurrentState response error: %s", statusErr.Error())
+			respondWithError(w, statusErr.Error())
+		} else if out.Data != nil {
+			log.Printf("DZK getCurrentState response success with data: %v", *out.Data)
+			respondWithJSON(w, http.StatusOK, *out.Data)
 		} else {
-			respondWithJSON(w, d.StatusCode, *d.Data)
+			log.Printf("DZK getCurrentState response error: event not found")
+			respondWithError(w, "event not found")
 		}
-	case <-time.After(5 * time.Second):
-		close(statusChannel)
-		respondWithError(w, "timeout waiting for status")
+	} else {
+		log.Printf("DZK getCurrentState response error: onReceive function not defined")
+		respondWithError(w, "onReceive function not defined")
 	}
 }
 

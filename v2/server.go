@@ -26,6 +26,7 @@ import (
 
 	"sync"
 
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/gorilla/mux"
 	"github.com/redhat-cne/sdk-go/pkg/channel"
 	"github.com/redhat-cne/sdk-go/pkg/event"
@@ -57,6 +58,7 @@ const (
 	started
 	notReady
 	failed
+	CURRENTSTATE = "CurrentState"
 )
 
 // Server defines rest routes server object
@@ -64,13 +66,14 @@ type Server struct {
 	port    int
 	apiPath string
 	//use dataOut chanel to write to configMap
-	dataOut       chan<- *channel.DataChan
-	closeCh       <-chan struct{}
-	HTTPClient    *http.Client
-	httpServer    *http.Server
-	pubSubAPI     *pubsubv1.API
-	subscriberAPI *subscriberApi.API
-	status        serverStatus
+	dataOut                 chan<- *channel.DataChan
+	closeCh                 <-chan struct{}
+	HTTPClient              *http.Client
+	httpServer              *http.Server
+	pubSubAPI               *pubsubv1.API
+	subscriberAPI           *subscriberApi.API
+	status                  serverStatus
+	statusReceiveOverrideFn func(e cloudevents.Event, dataChan *channel.DataChan) error
 }
 
 // publisher/subscription data model
@@ -118,7 +121,9 @@ type swaggReqAccepted struct { //nolint:deadcode,unused
 }
 
 // InitServer is used to supply configurations for rest routes server
-func InitServer(port int, apiPath, storePath string, dataOut chan<- *channel.DataChan, closeCh <-chan struct{}) *Server {
+func InitServer(port int, apiPath, storePath string,
+	dataOut chan<- *channel.DataChan, closeCh <-chan struct{},
+	onStatusReceiveOverrideFn func(e cloudevents.Event, dataChan *channel.DataChan) error) *Server {
 	once.Do(func() {
 		ServerInstance = &Server{
 			port:    port,
@@ -132,8 +137,9 @@ func InitServer(port int, apiPath, storePath string, dataOut chan<- *channel.Dat
 				},
 				Timeout: 10 * time.Second,
 			},
-			pubSubAPI:     pubsubv1.GetAPIInstance(storePath),
-			subscriberAPI: subscriberApi.GetAPIInstance(storePath),
+			pubSubAPI:               pubsubv1.GetAPIInstance(storePath),
+			subscriberAPI:           subscriberApi.GetAPIInstance(storePath),
+			statusReceiveOverrideFn: onStatusReceiveOverrideFn,
 		}
 	})
 	// singleton
@@ -360,4 +366,9 @@ func (s *Server) Start() {
 func (s *Server) Shutdown() {
 	log.Warnf("trying to shutdown rest api sever, please use close channel to shutdown ")
 	s.httpServer.Close()
+}
+
+// SetOnStatusReceiveOverrideFn ... sets receiver function
+func (s *Server) SetOnStatusReceiveOverrideFn(fn func(e cloudevents.Event, dataChan *channel.DataChan) error) {
+	s.statusReceiveOverrideFn = fn
 }
