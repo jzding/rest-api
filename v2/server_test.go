@@ -1,4 +1,4 @@
-// Copyright 2020 The Cloud Native Events Authors
+// Copyright 2024 The Cloud Native Events Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -153,7 +153,7 @@ func TestServer_CreateSubscription(t *testing.T) {
 	// create subscription
 	sub := api.NewPubSub(
 		&types.URI{URL: url.URL{Scheme: "http", Host: fmt.Sprintf("localhost:%d", port), Path: fmt.Sprintf("%s%s", apPath, "dummy")}},
-		resource)
+		resource, "1.0")
 
 	data, err := json.Marshal(&sub)
 	assert.Nil(t, err)
@@ -295,7 +295,7 @@ func TestServer_GetCurrentState_withSubscription(t *testing.T) {
 	// create subscription
 	sub := api.NewPubSub(
 		&types.URI{URL: url.URL{Scheme: "http", Host: fmt.Sprintf("localhost:%d", port), Path: fmt.Sprintf("%s%s", apPath, "dummy")}},
-		resource)
+		resource, "1.0")
 
 	data, err := json.Marshal(&sub)
 	assert.Nil(t, err)

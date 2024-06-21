@@ -1,4 +1,4 @@
-// Copyright 2020 The Cloud Native Events Authors
+// Copyright 2024 The Cloud Native Events Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,25 +21,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/redhat-cne/sdk-go/pkg/types"
-
 	"github.com/redhat-cne/rest-api/pkg/localmetrics"
+	"github.com/redhat-cne/rest-api/pkg/restclient"
+	"github.com/redhat-cne/sdk-go/pkg/channel"
+	cne "github.com/redhat-cne/sdk-go/pkg/event"
+	"github.com/redhat-cne/sdk-go/pkg/pubsub"
+	"github.com/redhat-cne/sdk-go/pkg/subscriber"
+	"github.com/redhat-cne/sdk-go/pkg/types"
+	"github.com/redhat-cne/sdk-go/v1/event"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	ce "github.com/cloudevents/sdk-go/v2/event"
 
-	cne "github.com/redhat-cne/sdk-go/pkg/event"
-	"github.com/redhat-cne/sdk-go/pkg/pubsub"
-
-	"github.com/redhat-cne/sdk-go/v1/event"
+	"net/http"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
-
-	"github.com/redhat-cne/sdk-go/pkg/channel"
-
-	"log"
-	"net/http"
+	log "github.com/sirupsen/logrus"
 )
 
 // createSubscription create subscription and send it to a channel that is shared by middleware to process
@@ -52,7 +50,6 @@ import (
 //	204: noContent
 func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
-	var response *http.Response
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -60,42 +57,118 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	sub := pubsub.PubSub{}
 	if err = json.Unmarshal(bodyBytes, &sub); err != nil {
-		respondWithError(w, "marshalling error")
+		respondWithStatusCode(w, http.StatusBadRequest, fmt.Sprintf("marshalling error %v", err))
 		localmetrics.UpdateSubscriptionCount(localmetrics.FAILCREATE, 1)
 		return
 	}
-	if sub.GetEndpointURI() != "" {
-		response, err = s.HTTPClient.Post(sub.GetEndpointURI(), cloudevents.ApplicationJSON, nil)
-		if err != nil {
-			log.Printf("there was error validating endpointurl %v, subscription wont be created", err)
-			localmetrics.UpdateSubscriptionCount(localmetrics.FAILCREATE, 1)
-			respondWithError(w, err.Error())
-			return
-		}
-		defer response.Body.Close()
-		if response.StatusCode != http.StatusNoContent {
-			log.Printf("there was an error validating endpointurl %s returned status code %d", sub.GetEndpointURI(), response.StatusCode)
-			respondWithError(w, "return url validation check failed for create subscription.check endpointURI")
-			localmetrics.UpdateSubscriptionCount(localmetrics.FAILCREATE, 1)
-			return
-		}
+	endPointURI := sub.GetEndpointURI()
+	if endPointURI == "" {
+		respondWithStatusCode(w, http.StatusBadRequest, "EndpointURI can not be empty")
+		localmetrics.UpdateSubscriptionCount(localmetrics.FAILCREATE, 1)
+		return
 	}
-	// check sub.EndpointURI by get
-	sub.SetID(uuid.New().String())
-	_ = sub.SetURILocation(fmt.Sprintf("http://localhost:%d%s%s/%s", s.port, s.apiPath, "subscriptions", sub.ID)) //nolint:errcheck
+	if subExists, ok := s.pubSubAPI.HasSubscription(sub.GetResource()); ok {
+		respondWithStatusCode(w, http.StatusConflict,
+			fmt.Sprintf("subscription (id: %s) with same resource already exists, skipping creation",
+				subExists.GetID()))
+		localmetrics.UpdateSubscriptionCount(localmetrics.FAILCREATE, 1)
+		return
+	}
+
+	id := uuid.New().String()
+	sub.SetID(id)
+	sub.SetVersion(API_VERSION)
+	sub.SetURILocation(fmt.Sprintf("http://localhost:%d%s%s/%s", s.port, s.apiPath, "subscriptions", sub.ID)) //nolint:errcheck
 
 	newSub, err := s.pubSubAPI.CreateSubscription(sub)
 	if err != nil {
-		log.Printf("error creating subscription %v", err)
+		respondWithStatusCode(w, http.StatusNotFound, fmt.Sprintf("error creating subscription %v", err))
 		localmetrics.UpdateSubscriptionCount(localmetrics.FAILCREATE, 1)
-		respondWithError(w, err.Error())
 		return
 	}
-	log.Printf("subscription created successfully.")
-	// go ahead and create QDR to this address
-	s.sendOut(channel.SUBSCRIBER, &newSub)
-	localmetrics.UpdateSubscriptionCount(localmetrics.ACTIVE, 1)
-	respondWithJSON(w, http.StatusCreated, newSub)
+	addr := newSub.GetResource()
+
+	// this is placeholder not sending back to report
+	out := channel.DataChan{
+		Address: addr,
+		// ClientID is not used
+		ClientID: uuid.New(),
+		Status:   channel.NEW,
+		Type:     channel.STATUS, // could be new event of new subscriber (sender)
+	}
+
+	e, _ := out.CreateCloudEvents(CURRENTSTATE)
+	e.SetSource(addr)
+
+	if s.statusReceiveOverrideFn == nil {
+		respondWithStatusCode(w, http.StatusNotFound, "onReceive function not defined")
+		localmetrics.UpdateSubscriptionCount(localmetrics.FAILCREATE, 1)
+		return
+	}
+
+	if statusErr := s.statusReceiveOverrideFn(*e, &out); statusErr != nil {
+		respondWithStatusCode(w, http.StatusNotFound, statusErr.Error())
+		localmetrics.UpdateSubscriptionCount(localmetrics.FAILCREATE, 1)
+		return
+	}
+
+	if out.Data == nil {
+		respondWithStatusCode(w, http.StatusNotFound, "event not found")
+		localmetrics.UpdateSubscriptionCount(localmetrics.FAILCREATE, 1)
+		log.Error("event not found")
+	}
+
+	restClient := restclient.New()
+	out.Data.SetID(newSub.ID) // set ID to the subscriptionID
+	status, err := restClient.PostCloudEvent(sub.EndPointURI, *out.Data)
+	if err != nil {
+		respondWithStatusCode(w, http.StatusBadRequest,
+			fmt.Sprintf("failed to POST initial notification: %v, subscription wont be created", err))
+		localmetrics.UpdateSubscriptionCount(localmetrics.FAILCREATE, 1)
+		return
+	}
+	if status != http.StatusNoContent {
+		respondWithStatusCode(w, http.StatusBadRequest,
+			fmt.Sprintf("initial notification returned wrong status code %d", status))
+		localmetrics.UpdateSubscriptionCount(localmetrics.FAILCREATE, 1)
+		return
+	}
+
+	log.Infof("initial notification is successful for subscription %s", addr)
+	// create unique clientId for each subscription based on endPointURI
+	subs := subscriber.New(s.getClientIDFromURI(endPointURI))
+	_ = subs.SetEndPointURI(endPointURI)
+
+	subs.AddSubscription(newSub)
+	subs.Action = channel.NEW
+	cevent, _ := subs.CreateCloudEvents()
+	cevent.SetSource(addr)
+
+	// send this to dataOut channel to update configMap
+	out = channel.DataChan{
+		Address: addr,
+		Data:    cevent,
+		Status:  channel.NEW,
+		Type:    channel.SUBSCRIBER,
+	}
+
+	var updatedObj *subscriber.Subscriber
+	// writes a file <clientID>.json that has the same content as configMap.
+	// configMap was created later as a way to persist the data.
+	if updatedObj, err = s.subscriberAPI.CreateSubscription(subs.ClientID, *subs); err != nil {
+		out.Status = channel.FAILED
+		respondWithStatusCode(w, http.StatusNotFound,
+			fmt.Sprintf("failed creating subscription for %s, %v", subs.ClientID.String(), err))
+		localmetrics.UpdateSubscriptionCount(localmetrics.FAILCREATE, 1)
+	} else {
+		out.Status = channel.SUCCESS
+		_ = out.Data.SetData(cloudevents.ApplicationJSON, updatedObj)
+		log.Infof("subscription created successfully.")
+		localmetrics.UpdateSubscriptionCount(localmetrics.ACTIVE, 1)
+		respondWithJSON(w, http.StatusCreated, newSub)
+	}
+
+	s.dataOut <- &out
 }
 
 // createPublisher create publisher and send it to a channel that is shared by middleware to process
@@ -123,14 +196,14 @@ func (s *Server) createPublisher(w http.ResponseWriter, r *http.Request) {
 	if pub.GetEndpointURI() != "" {
 		response, err = s.HTTPClient.Post(pub.GetEndpointURI(), cloudevents.ApplicationJSON, nil)
 		if err != nil {
-			log.Printf("there was an error validating the publisher endpointurl %v, publisher won't be created.", err)
+			log.Infof("there was an error validating the publisher endpointurl %v, publisher won't be created.", err)
 			localmetrics.UpdatePublisherCount(localmetrics.FAILCREATE, 1)
 			respondWithError(w, err.Error())
 			return
 		}
 		defer response.Body.Close()
 		if response.StatusCode != http.StatusNoContent {
-			log.Printf("there was an error validating endpointurl %s returned status code %d", pub.GetEndpointURI(), response.StatusCode)
+			log.Infof("there was an error validating endpointurl %s returned status code %d", pub.GetEndpointURI(), response.StatusCode)
 			localmetrics.UpdatePublisherCount(localmetrics.FAILCREATE, 1)
 			respondWithError(w, "return url validation check failed for create publisher,check endpointURI")
 			return
@@ -142,12 +215,12 @@ func (s *Server) createPublisher(w http.ResponseWriter, r *http.Request) {
 	_ = pub.SetURILocation(fmt.Sprintf("http://localhost:%d%s%s/%s", s.port, s.apiPath, "publishers", pub.ID)) //nolint:errcheck
 	newPub, err := s.pubSubAPI.CreatePublisher(pub)
 	if err != nil {
-		log.Printf("error creating publisher %v", err)
+		log.Infof("error creating publisher %v", err)
 		localmetrics.UpdatePublisherCount(localmetrics.FAILCREATE, 1)
 		respondWithError(w, err.Error())
 		return
 	}
-	log.Printf("publisher created successfully.")
+	log.Infof("publisher created successfully.")
 	// go ahead and create QDR to this address
 	s.sendOut(channel.PUBLISHER, &newPub)
 	localmetrics.UpdatePublisherCount(localmetrics.ACTIVE, 1)
@@ -180,12 +253,12 @@ func (s *Server) getSubscriptionByID(w http.ResponseWriter, r *http.Request) {
 	queries := mux.Vars(r)
 	subscriptionID, ok := queries["subscriptionid"]
 	if !ok {
-		respondWithError(w, "subscription not found")
+		respondWithStatusCode(w, http.StatusNotFound, "")
 		return
 	}
 	sub, err := s.pubSubAPI.GetSubscription(subscriptionID)
 	if err != nil {
-		respondWithError(w, "subscription not found")
+		respondWithStatusCode(w, http.StatusNotFound, "")
 		return
 	}
 	respondWithJSON(w, http.StatusOK, sub)
@@ -251,12 +324,31 @@ func (s *Server) deleteSubscription(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.pubSubAPI.DeleteSubscription(subscriptionID); err != nil {
 		localmetrics.UpdateSubscriptionCount(localmetrics.FAILDELETE, 1)
-		respondWithError(w, err.Error())
+		respondWithStatusCode(w, http.StatusNotFound, err.Error())
 		return
 	}
 
+	// update configMap
+	for _, c := range s.subscriberAPI.GetClientIDBySubID(subscriptionID) {
+		if err := s.subscriberAPI.DeleteSubscription(c, subscriptionID); err != nil {
+			localmetrics.UpdateSubscriptionCount(localmetrics.FAILDELETE, 1)
+			respondWithStatusCode(w, http.StatusNotFound, err.Error())
+			return
+		}
+	}
+
+	for _, subs := range s.subscriberAPI.SubscriberStore.Store {
+		cevent, _ := subs.CreateCloudEvents()
+		out := channel.DataChan{
+			Data:   cevent,
+			Status: channel.SUCCESS,
+			Type:   channel.SUBSCRIBER,
+		}
+		s.dataOut <- &out
+	}
+
 	localmetrics.UpdateSubscriptionCount(localmetrics.ACTIVE, -1)
-	respondWithMessage(w, http.StatusOK, "OK")
+	respondWithStatusCode(w, http.StatusNoContent, "")
 }
 
 func (s *Server) deleteAllSubscriptions(w http.ResponseWriter, _ *http.Request) {
@@ -357,41 +449,36 @@ func (s *Server) getCurrentState(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, "subscription not found")
 		return
 	}
-	cneEvent := event.CloudNativeEvent()
-	cneEvent.SetID(sub.ID)
-	cneEvent.Type = channel.STATUS.String()
-	cneEvent.SetTime(types.Timestamp{Time: time.Now().UTC()}.Time)
-	cneEvent.SetDataContentType(cloudevents.ApplicationJSON)
-	cneEvent.SetData(cne.Data{
-		Version: "v1",
-	})
-	ceEvent, err := cneEvent.NewCloudEvent(sub)
 
-	if err != nil {
-		respondWithError(w, err.Error())
+	if resourceAddress == "" {
+		_ = json.NewEncoder(w).Encode(map[string]string{"message": "validation failed, resource is empty"})
+	}
+
+	if !strings.HasPrefix(resourceAddress, "/") {
+		resourceAddress = fmt.Sprintf("/%s", resourceAddress)
+	}
+	// this is placeholder not sending back to report
+	out := channel.DataChan{
+		Address: resourceAddress,
+		// ClientID is not used
+		ClientID: uuid.New(),
+		Status:   channel.NEW,
+		Type:     channel.STATUS, // could be new event of new subscriber (sender)
+	}
+
+	e, _ := out.CreateCloudEvents(CURRENTSTATE)
+	e.SetSource(resourceAddress)
+	// statusReceiveOverrideFn must return value for
+	if s.statusReceiveOverrideFn != nil {
+		if statusErr := s.statusReceiveOverrideFn(*e, &out); statusErr != nil {
+			respondWithError(w, statusErr.Error())
+		} else if out.Data != nil {
+			respondWithJSON(w, http.StatusOK, *out.Data)
+		} else {
+			respondWithError(w, "event not found")
+		}
 	} else {
-		// for http you send to the protocol address
-		statusChannel := make(chan *channel.StatusChan, 1)
-		s.dataOut <- &channel.DataChan{
-			Type:       channel.STATUS,
-			Data:       ceEvent,
-			Address:    sub.GetResource(),
-			StatusChan: statusChannel,
-		}
-		select {
-		case d := <-statusChannel:
-			if d.Data == nil || d.StatusCode != http.StatusOK {
-				if string(d.Message) == "" {
-					d.Message = []byte("event not found")
-				}
-				respondWithError(w, string(d.Message))
-			} else {
-				respondWithJSON(w, d.StatusCode, *d.Data)
-			}
-		case <-time.After(5 * time.Second):
-			close(statusChannel)
-			respondWithError(w, "timeout waiting for status")
-		}
+		respondWithError(w, "onReceive function not defined")
 	}
 }
 
@@ -445,8 +532,12 @@ func (s *Server) logEvent(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, err.Error())
 		return
 	} // check if publisher is found
-	log.Printf("event received %v", cneEvent)
+	log.Infof("event received %v", cneEvent)
 	respondWithMessage(w, http.StatusAccepted, "Event published to log")
+}
+
+func (s *Server) getClientIDFromURI(uri string) uuid.UUID {
+	return uuid.NewMD5(uuid.NameSpaceURL, []byte(uri))
 }
 
 func dummy(w http.ResponseWriter, _ *http.Request) {
@@ -455,6 +546,15 @@ func dummy(w http.ResponseWriter, _ *http.Request) {
 
 func respondWithError(w http.ResponseWriter, message string) {
 	respondWithJSON(w, http.StatusBadRequest, map[string]string{"error": message})
+}
+
+func respondWithStatusCode(w http.ResponseWriter, code int, message string) {
+	if message != "" {
+		log.Errorf("%s", message)
+		// Response with message if spec were updated to allow message
+		// respondWithJSON(w, code, map[string]string{"error": message})
+	}
+	w.WriteHeader(code)
 }
 
 func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {

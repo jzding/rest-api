@@ -153,7 +153,7 @@ func TestServer_CreateSubscription(t *testing.T) {
 	// create subscription
 	sub := api.NewPubSub(
 		&types.URI{URL: url.URL{Scheme: "http", Host: fmt.Sprintf("localhost:%d", port), Path: fmt.Sprintf("%s%s", apPath, "dummy")}},
-		resource)
+		resource, "1.0")
 
 	data, err := json.Marshal(&sub)
 	assert.Nil(t, err)
@@ -295,7 +295,7 @@ func TestServer_GetCurrentState_withSubscription(t *testing.T) {
 	// create subscription
 	sub := api.NewPubSub(
 		&types.URI{URL: url.URL{Scheme: "http", Host: fmt.Sprintf("localhost:%d", port), Path: fmt.Sprintf("%s%s", apPath, "dummy")}},
-		resource)
+		resource, "1.0")
 
 	data, err := json.Marshal(&sub)
 	assert.Nil(t, err)

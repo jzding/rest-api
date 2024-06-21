@@ -1,4 +1,12 @@
-// Copyright 2020 The Cloud Native Events Authors
+package subscriber
+
+import (
+	"github.com/google/uuid"
+	"github.com/redhat-cne/sdk-go/pkg/pubsub"
+	"github.com/redhat-cne/sdk-go/pkg/store"
+)
+
+// Copyright 2022 The Cloud Native Events Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,35 +20,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package pubsub
-
 // Reader is the interface for reading through an event from attributes.
 type Reader interface {
-	// GetVersion returns event.GetVersion()
-	GetVersion() string
-	// GetResource returns event.GetResource()
-	GetResource() string
-	// GetEndpointUri returns event.GetEndpointUri()
-	GetEndpointURI() string
-	// GetURILocation returns event.GetUriLocation()
-	GetURILocation() string
-	GetID() string
+	// GetClientID returns clientID
+	GetClientID() uuid.UUID
+	// GetStatus Get Status of the subscribers
+	GetStatus() Status
 	// String returns a pretty-printed representation of the PubSub.
 	String() string
+	// GetSubStore return pubsub data
+	GetSubStore() *store.PubSubStore
+	// GetEndPointURI EndPointURI return   endpoint
+	GetEndPointURI() string
 }
 
 // Writer is the interface for writing through an event onto attributes.
-// If an error is thrown by a sub-component, Writer caches the error
+// If an error is thrown by a subcomponent, Writer caches the error
 // internally and exposes errors with a call to Writer.Validate().
 type Writer interface {
-	// SetVersion performs event.SetVersion()
-	SetVersion(string)
-	// SetResource performs event.SetResource()
-	SetResource(string) error
-	// SetEndpointURI [erforms] event.SetEndpointURI()
-	SetEndpointURI(string) error
-	// SetURILocation performs event.SetURILocation()
-	SetURILocation(string) error
-	// SetID performs event.SetID.
-	SetID(string)
+	// SetClientID Resource performs event.SetResource()
+	SetClientID(clientID uuid.UUID)
+
+	// SetStatus SetID performs event.SetID.
+	SetStatus(status Status)
+
+	// SetEndPointURI SetHealthEndPoint set health endpoint
+	SetEndPointURI(url string) error
+
+	AddSubscription(sub ...pubsub.PubSub)
 }
