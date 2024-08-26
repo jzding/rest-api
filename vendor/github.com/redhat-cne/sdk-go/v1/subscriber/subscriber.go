@@ -395,6 +395,14 @@ func (p *API) IncFailCountToFail(clientID uuid.UUID) bool {
 	return false
 }
 
+// ResetFailCount ..reset fail count
+func (p *API) ResetFailCount(clientID uuid.UUID) {
+	if subStore, ok := p.SubscriberStore.Get(clientID); ok {
+		subStore.ResetFailCount()
+		p.SubscriberStore.Set(clientID, subStore)
+	}
+}
+
 // FailCountThreshold .. get threshold
 func (p *API) FailCountThreshold() int {
 	return subscriber.SetConnectionToFailAfter
