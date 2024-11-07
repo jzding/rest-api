@@ -1,4 +1,7 @@
 basePath: /api/ocloudNotifications/v2
+externalDocs:
+  description: PTP Events REST API V2 Reference
+  url: https://docs.openshift.com/container-platform/4.17/networking/ptp/ptp-events-rest-api-reference-v2.html
 host: localhost:8089
 info:
   contact:
@@ -9,8 +12,7 @@ info:
   license:
     name: Apache 2.0
     url: http://www.apache.org/licenses/LICENSE-2.0.html
-  termsOfService: http://swagger.io/terms/
-  title: O-RAN compliant REST-API
+  title: O-RAN Compliant REST-API
   version: "1.0"
 paths: {}
 swagger: "2.0"

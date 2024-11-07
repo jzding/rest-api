@@ -9,7 +9,6 @@ const docTemplate = `{
     "info": {
         "description": "{{escape .Description}}",
         "title": "{{.Title}}",
-        "termsOfService": "http://swagger.io/terms/",
         "contact": {
             "name": "PTP Dev Team",
             "email": "ptp-dev@redhat.com"
@@ -22,7 +21,11 @@ const docTemplate = `{
     },
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
-    "paths": {}
+    "paths": {},
+    "externalDocs": {
+        "description": "PTP Events REST API V2 Reference",
+        "url": "https://docs.openshift.com/container-platform/4.17/networking/ptp/ptp-events-rest-api-reference-v2.html"
+    }
 }`
 
 // SwaggerInfo holds exported Swagger Info so clients can modify it
@@ -31,7 +34,7 @@ var SwaggerInfo = &swag.Spec{
 	Host:             "localhost:8089",
 	BasePath:         "/api/ocloudNotifications/v2",
 	Schemes:          []string{},
-	Title:            "O-RAN compliant REST-API",
+	Title:            "O-RAN Compliant REST-API",
 	Description:      "This is an implementation of O-Cloud Notification API specification for Event Consumers v04.00",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,

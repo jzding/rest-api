@@ -2,8 +2,7 @@
     "swagger": "2.0",
     "info": {
         "description": "This is an implementation of O-Cloud Notification API specification for Event Consumers v04.00",
-        "title": "O-RAN compliant REST-API",
-        "termsOfService": "http://swagger.io/terms/",
+        "title": "O-RAN Compliant REST-API",
         "contact": {
             "name": "PTP Dev Team",
             "email": "ptp-dev@redhat.com"
@@ -16,5 +15,9 @@
     },
     "host": "localhost:8089",
     "basePath": "/api/ocloudNotifications/v2",
-    "paths": {}
+    "paths": {},
+    "externalDocs": {
+        "description": "PTP Events REST API V2 Reference",
+        "url": "https://docs.openshift.com/container-platform/4.17/networking/ptp/ptp-events-rest-api-reference-v2.html"
+    }
 }

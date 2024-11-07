@@ -12,46 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package restapi Pub/Sub Rest API.
-//
-// Rest API spec .
-//
-// Terms Of Service:
-//
-//	Schemes: http, https
-//	Host: localhost:8089
-//	BasePath: /api/ocloudNotifications/v2
-//	Version: 2.0.0
-//
-//	Consumes:
-//	- application/json
-//
-//	Produces:
-//	- application/json
-//
-// swagger:meta
 package restapi
 
 import (
 	"fmt"
 
 	_ "github.com/redhat-cne/rest-api/v2/docs"
-	"github.com/redhat-cne/sdk-go/pkg/util/wait"
-
-	"sync"
+	httpSwagger "github.com/swaggo/http-swagger/v2"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/gorilla/mux"
 	"github.com/redhat-cne/sdk-go/pkg/channel"
-	"github.com/redhat-cne/sdk-go/pkg/event"
-	"github.com/redhat-cne/sdk-go/pkg/pubsub"
 	"github.com/redhat-cne/sdk-go/pkg/types"
+	"github.com/redhat-cne/sdk-go/pkg/util/wait"
 	pubsubv1 "github.com/redhat-cne/sdk-go/v1/pubsub"
 	subscriberApi "github.com/redhat-cne/sdk-go/v1/subscriber"
 
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -94,54 +74,9 @@ type Server struct {
 	statusReceiveOverrideFn func(e cloudevents.Event, dataChan *channel.DataChan) error
 }
 
-// publisher/subscription data model
-// swagger:response pubSubResp
-type swaggPubSubRes struct { //nolint:deadcode,unused
-	// in:body
-	Body pubsub.PubSub
-}
-
-// PubSub request model
-// swagger:response eventResp
-type swaggPubSubEventRes struct { //nolint:deadcode,unused
-	// in:body
-	Body event.Event
-}
-
-// Error Bad Request
-// swagger:response badReq
-type swaggReqBadRequest struct { //nolint:deadcode,unused
-	// in:body
-	Body struct {
-		// HTTP status code 400 -  Bad Request
-		Code int `json:"code" example:"400"`
-	}
-}
-
-// Error Not Found
-// swagger:response notFoundReq
-type swaggReqNotFound struct { //nolint:deadcode,unused
-	// in:body
-	Body struct {
-		// HTTP status code 404 -  Not Found
-		Code int `json:"code" example:"404"`
-	}
-}
-
-// Accepted
-// swagger:response acceptedReq
-type swaggReqAccepted struct { //nolint:deadcode,unused
-	// in:body
-	Body struct {
-		// HTTP status code 202 -  Accepted
-		Code int `json:"code" example:"202"`
-	}
-}
-
-//	@title			O-RAN compliant REST-API
+//	@title			O-RAN Compliant REST-API
 //	@version		1.0
 //	@description	This is an implementation of O-Cloud Notification API specification for Event Consumers v04.00
-//	@termsOfService	http://swagger.io/terms/
 
 //	@contact.name	PTP Dev Team
 //	@contact.email	ptp-dev@redhat.com
@@ -151,6 +86,9 @@ type swaggReqAccepted struct { //nolint:deadcode,unused
 
 //	@host		localhost:8089
 //	@BasePath	/api/ocloudNotifications/v2
+
+//	@externalDocs.description	PTP Events REST API V2 Reference
+//	@externalDocs.url			https://docs.openshift.com/container-platform/4.17/networking/ptp/ptp-events-rest-api-reference-v2.html
 
 // InitServer is used to supply configurations for rest routes server
 func InitServer(port int, apiHost, apiPath, storePath string,
@@ -236,6 +174,8 @@ func (s *Server) Start() {
 	s.status = starting
 	r := mux.NewRouter()
 
+	r.PathPrefix("/swagger/").Handler(httpSwagger.Handler(
+
 	api := r.PathPrefix(s.apiPath).Subrouter()
 
 	// createSubscription create subscription and send it to a channel that is shared by middleware to process
@@ -273,18 +213,19 @@ func (s *Server) Start() {
 	//   "400":
 	//     "$ref": "#/responses/badReq"
 	api.HandleFunc("/publishers", s.createPublisher).Methods(http.MethodPost)
-	/*
-		 this method a list of subscription object(s) and their associated properties
-		200  Returns the subscription resources and their associated properties that already exist.
-			See note below.
-		404 Subscription resources are not available (not created).
-	*/
-	// swagger:route GET /subscriptions
-	// Get a list of subscription object(s) and their associated properties.
-	// responses:
-	//   200: Returns the subscription resources and their associated properties that already exist.
-	//   400: Bad request by the client.
+
+	// Listsubscriptions lists all existing subscriptions
+	//
+	//	@Summary		List subscriptions
+	//	@Description	Get a list of subscription object(s) and their associated properties.
+	//	@Tags			subscriptions
+	//	@Accept			json
+	//	@Produce		json
+	//	@Success		200	{array}		pubsub.PubSub			Returns the subscription resources and their associated	properties that already exist.
+	//	@Failure		400	{object}	http.StatusBadRequest	Bad request	by the client.
+	//	@Router			/subscriptions [get]
 	api.HandleFunc("/subscriptions", s.getSubscriptions).Methods(http.MethodGet)
+
 	//publishers create publisher and send it to a channel that is shared by middleware to process
 	// swagger:operation GET /publishers/ publishers getPublishers
 	// ---
