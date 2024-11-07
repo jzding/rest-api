@@ -1,0 +1,20 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "description": "This is an implementation of O-Cloud Notification API specification for Event Consumers v04.00",
+        "title": "O-RAN compliant REST-API",
+        "termsOfService": "http://swagger.io/terms/",
+        "contact": {
+            "name": "PTP Dev Team",
+            "email": "ptp-dev@redhat.com"
+        },
+        "license": {
+            "name": "Apache 2.0",
+            "url": "http://www.apache.org/licenses/LICENSE-2.0.html"
+        },
+        "version": "1.0"
+    },
+    "host": "localhost:8089",
+    "basePath": "/api/ocloudNotifications/v2",
+    "paths": {}
+}

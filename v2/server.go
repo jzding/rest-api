@@ -20,9 +20,8 @@
 //
 //	Schemes: http, https
 //	Host: localhost:8089
-//	basePath: /api/ocloudNotifications/v1
-//	Version: 1.0.0
-//	Contact: Aneesh Puttur<aputtur@redhat.com>
+//	BasePath: /api/ocloudNotifications/v2
+//	Version: 2.0.0
 //
 //	Consumes:
 //	- application/json
@@ -36,6 +35,7 @@ package restapi
 import (
 	"fmt"
 
+	_ "github.com/redhat-cne/rest-api/v2/docs"
 	"github.com/redhat-cne/sdk-go/pkg/util/wait"
 
 	"sync"
@@ -137,6 +137,20 @@ type swaggReqAccepted struct { //nolint:deadcode,unused
 		Code int `json:"code" example:"202"`
 	}
 }
+
+//	@title			O-RAN compliant REST-API
+//	@version		1.0
+//	@description	This is an implementation of O-Cloud Notification API specification for Event Consumers v04.00
+//	@termsOfService	http://swagger.io/terms/
+
+//	@contact.name	PTP Dev Team
+//	@contact.email	ptp-dev@redhat.com
+
+//	@license.name	Apache 2.0
+//	@license.url	http://www.apache.org/licenses/LICENSE-2.0.html
+
+//	@host		localhost:8089
+//	@BasePath	/api/ocloudNotifications/v2
 
 // InitServer is used to supply configurations for rest routes server
 func InitServer(port int, apiHost, apiPath, storePath string,
@@ -265,6 +279,11 @@ func (s *Server) Start() {
 			See note below.
 		404 Subscription resources are not available (not created).
 	*/
+	// swagger:route GET /subscriptions
+	// Get a list of subscription object(s) and their associated properties.
+	// responses:
+	//   200: Returns the subscription resources and their associated properties that already exist.
+	//   400: Bad request by the client.
 	api.HandleFunc("/subscriptions", s.getSubscriptions).Methods(http.MethodGet)
 	//publishers create publisher and send it to a channel that is shared by middleware to process
 	// swagger:operation GET /publishers/ publishers getPublishers
