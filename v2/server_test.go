@@ -71,7 +71,7 @@ func onReceiveOverrideFn(e cloudevents.Event, d *channel.DataChan) error {
 
 	data := &event.Data{
 		Version: event.APISchemaVersion,
-		Values:  []event.DataValue{},
+		Values:  []event.DataValue{{Resource: resource, DataType: event.NOTIFICATION, ValueType: event.ENUMERATION, Value: ptp.FREERUN}},
 	}
 	ce := cloudevents.NewEvent(cloudevents.VersionV1)
 	ce.SetTime(types.Timestamp{Time: time.Now().UTC()}.Time)
@@ -512,6 +512,109 @@ func TestServer_GetCurrentState_KO_ResourceInvalid(t *testing.T) {
 	// try getting event
 	time.Sleep(2 * time.Second)
 	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d%s%s/%s", port, apPath, resourceInvalid, "CurrentState"), nil)
+	assert.Nil(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := server.HTTPClient.Do(req)
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+	s, err2 := io.ReadAll(resp.Body)
+	assert.Nil(t, err2)
+	log.Infof("tedt %s ", string(s))
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func onReceiveOverrideFnEmptyEventData(e cloudevents.Event, d *channel.DataChan) error {
+	if e.Source() != resource {
+		return fmt.Errorf("could not find any events for requested resource type %s", e.Source())
+	}
+
+	ce := cloudevents.NewEvent(cloudevents.VersionV1)
+	ce.SetTime(types.Timestamp{Time: time.Now().UTC()}.Time)
+	ce.SetType(testType)
+	ce.SetSource(testSource)
+	ce.SetSpecVersion(cloudevents.VersionV1)
+	ce.SetID(uuid.New().String())
+	ce.SetData("", nil) //nolint:errcheck
+	d.Data = &ce
+
+	return nil
+}
+
+func TestServer_GetCurrentState_KO_EmptyEventData(t *testing.T) {
+	server.SetOnStatusReceiveOverrideFn(onReceiveOverrideFnEmptyEventData)
+	ctx := context.Background()
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d%s%s/%s", port, apPath, ObjSub.Resource, "CurrentState"), nil)
+	assert.Nil(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := server.HTTPClient.Do(req)
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+	s, err2 := io.ReadAll(resp.Body)
+	assert.Nil(t, err2)
+	log.Infof("tedt %s ", string(s))
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func onReceiveOverrideFnInvalidEventData(e cloudevents.Event, d *channel.DataChan) error {
+	if e.Source() != resource {
+		return fmt.Errorf("could not find any events for requested resource type %s", e.Source())
+	}
+
+	data := &event.Data{
+		Version: event.APISchemaVersion,
+		Values:  []event.DataValue{},
+	}
+	ce := cloudevents.NewEvent(cloudevents.VersionV1)
+	ce.SetTime(types.Timestamp{Time: time.Now().UTC()}.Time)
+	ce.SetType(testType)
+	ce.SetSource(testSource)
+	ce.SetSpecVersion(cloudevents.VersionV1)
+	ce.SetID(uuid.New().String())
+	ce.SetData("", *data) //nolint:errcheck
+	d.Data = &ce
+
+	return nil
+}
+
+func TestServer_GetCurrentState_KO_InvalidEventData(t *testing.T) {
+	server.SetOnStatusReceiveOverrideFn(onReceiveOverrideFnInvalidEventData)
+	ctx := context.Background()
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d%s%s/%s", port, apPath, ObjSub.Resource, "CurrentState"), nil)
+	assert.Nil(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := server.HTTPClient.Do(req)
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+	s, err2 := io.ReadAll(resp.Body)
+	assert.Nil(t, err2)
+	log.Infof("tedt %s ", string(s))
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func onReceiveOverrideFnEventNotFound(e cloudevents.Event, d *channel.DataChan) error {
+	if e.Source() != resource {
+		return fmt.Errorf("could not find any events for requested resource type %s", e.Source())
+	}
+
+	data := &event.Data{
+		Version: event.APISchemaVersion,
+		Values:  []event.DataValue{{Resource: "event-not-found", DataType: event.NOTIFICATION, ValueType: event.ENUMERATION, Value: ptp.FREERUN}},
+	}
+	ce := cloudevents.NewEvent(cloudevents.VersionV1)
+	ce.SetTime(types.Timestamp{Time: time.Now().UTC()}.Time)
+	ce.SetType(testType)
+	ce.SetSource(testSource)
+	ce.SetSpecVersion(cloudevents.VersionV1)
+	ce.SetID(uuid.New().String())
+	ce.SetData("", *data) //nolint:errcheck
+	d.Data = &ce
+
+	return nil
+}
+func TestServer_GetCurrentState_KO_event_not_found(t *testing.T) {
+	server.SetOnStatusReceiveOverrideFn(onReceiveOverrideFnEventNotFound)
+	ctx := context.Background()
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%d%s%s/%s", port, apPath, ObjSub.Resource, "CurrentState"), nil)
 	assert.Nil(t, err)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := server.HTTPClient.Do(req)
