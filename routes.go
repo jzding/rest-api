@@ -42,6 +42,17 @@ import (
 	"net/http"
 )
 
+const (
+	// the following special resource addresses are used in POST /subscriptions to
+	// send initial notification to test EndpointURI in order to successfully
+	// create a subscription when event data is not available.
+
+	// EventNotFound is a special resource address set when event data is not found.
+	EventNotFound = "event-not-found"
+	// PTPNotSet is a special resource address set when PTP stats is not yet populated.
+	PTPNotSet = "ptp-not-set"
+)
+
 // createSubscription create subscription and send it to a channel that is shared by middleware to process
 // Creates a new subscription .
 // If subscription exists with same resource then existing subscription is returned .
@@ -382,11 +393,27 @@ func (s *Server) getCurrentState(w http.ResponseWriter, r *http.Request) {
 		case d := <-statusChannel:
 			if d.Data == nil || d.StatusCode != http.StatusOK {
 				if string(d.Message) == "" {
-					d.Message = []byte("event not found")
+					d.Message = []byte("event not found for " + resourceAddress)
 				}
 				respondWithError(w, string(d.Message))
 			} else {
-				respondWithJSON(w, d.StatusCode, *d.Data)
+				// Unmarshal the cloud event data to check for resource data
+				var eventData cne.Data
+				if d.Data.Data() == nil {
+					respondWithError(w, "event data is empty for "+resourceAddress)
+					return
+				} else if err := json.Unmarshal(d.Data.Data(), &eventData); err != nil {
+					respondWithError(w, "error unmarshalling event data for "+resourceAddress+": "+err.Error())
+					return
+				} else if len(eventData.Values) == 0 || eventData.Values[0].Resource == "" {
+					respondWithError(w, "event data is invalid for "+resourceAddress)
+					return
+				} else if strings.HasSuffix(eventData.Values[0].Resource, EventNotFound) || strings.HasSuffix(eventData.Values[0].Resource, PTPNotSet) {
+					respondWithError(w, "event data not found for "+resourceAddress)
+					return
+				} else {
+					respondWithJSON(w, d.StatusCode, eventData.Values[0])
+				}
 			}
 		case <-time.After(5 * time.Second):
 			close(statusChannel)
