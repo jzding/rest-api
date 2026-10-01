@@ -196,19 +196,27 @@ func noRedirectPolicy(_ *http.Request, _ []*http.Request) error {
 }
 
 // bearerTokenRoundTripper injects a ServiceAccount bearer token into the
-// Authorization header of every outbound request. It wraps the push client's
-// transport so the server can authenticate to OAuth-enforcing callbacks (the
-// initial-notification and publisher-endpoint-validation POSTs). The token is
-// read from tokenPath per request so that rotated projected ServiceAccount
+// Authorization header of every outbound HTTPS request. It wraps the push
+// client's transport so the server can authenticate to OAuth-enforcing callbacks
+// (the initial-notification and publisher-endpoint-validation POSTs). The token
+// is read from tokenPath per request so that rotated projected ServiceAccount
 // tokens are always current without restarting the server. A read failure is
 // logged and the request proceeds without the header, letting the callback
 // return its own 401 rather than silently dropping the push.
+//
+// The token is a cluster credential, so it is attached only to https requests:
+// a subscriber may register an http:// callback (validateEndpointURI permits it),
+// and sending the bearer token over plaintext would leak it on the wire. Plain
+// http pushes are forwarded unmodified and the callback can enforce its own auth.
 type bearerTokenRoundTripper struct {
 	base      http.RoundTripper
 	tokenPath string
 }
 
 func (t *bearerTokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL == nil || req.URL.Scheme != "https" {
+		return t.base.RoundTrip(req)
+	}
 	data, err := os.ReadFile(t.tokenPath)
 	if err != nil {
 		log.Errorf("failed to read ServiceAccount token from %s for outbound push: %v", t.tokenPath, err)

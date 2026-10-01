@@ -40,17 +40,19 @@ func TestBearerTokenRoundTripper(t *testing.T) {
 		t.Fatalf("write token: %v", err)
 	}
 
-	cap := &captureRoundTripper{}
-	rt := &bearerTokenRoundTripper{base: cap, tokenPath: tokenPath}
+	capRT := &captureRoundTripper{}
+	rt := &bearerTokenRoundTripper{base: capRT, tokenPath: tokenPath}
 
 	req, err := http.NewRequest(http.MethodPost, "https://example.svc:9043/event", http.NoBody)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	if _, err := rt.RoundTrip(req); err != nil {
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
 		t.Fatalf("RoundTrip: %v", err)
 	}
-	if got := cap.last.Header.Get("Authorization"); got != "Bearer tok-123" {
+	resp.Body.Close()
+	if got := capRT.last.Header.Get("Authorization"); got != "Bearer tok-123" {
 		t.Errorf("Authorization = %q, want %q", got, "Bearer tok-123")
 	}
 	// Contract: the caller's original request must not be mutated.
@@ -62,20 +64,42 @@ func TestBearerTokenRoundTripper(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte("tok-456"), 0o600); err != nil {
 		t.Fatalf("rewrite token: %v", err)
 	}
-	if _, err := rt.RoundTrip(req); err != nil {
+	resp, err = rt.RoundTrip(req)
+	if err != nil {
 		t.Fatalf("RoundTrip after rotation: %v", err)
 	}
-	if got := cap.last.Header.Get("Authorization"); got != "Bearer tok-456" {
+	resp.Body.Close()
+	if got := capRT.last.Header.Get("Authorization"); got != "Bearer tok-456" {
 		t.Errorf("rotated Authorization = %q, want %q", got, "Bearer tok-456")
 	}
 
 	// Missing token file: request still proceeds, no Authorization header set.
-	rtMissing := &bearerTokenRoundTripper{base: cap, tokenPath: filepath.Join(dir, "absent")}
-	if _, err := rtMissing.RoundTrip(req); err != nil {
+	rtMissing := &bearerTokenRoundTripper{base: capRT, tokenPath: filepath.Join(dir, "absent")}
+	resp, err = rtMissing.RoundTrip(req)
+	if err != nil {
 		t.Fatalf("RoundTrip missing token: %v", err)
 	}
-	if got := cap.last.Header.Get("Authorization"); got != "" {
+	resp.Body.Close()
+	if got := capRT.last.Header.Get("Authorization"); got != "" {
 		t.Errorf("missing-token request set Authorization = %q, want empty", got)
+	}
+
+	// Plaintext http callback: the token is a cluster credential and must not be
+	// sent over an unencrypted request, even when a valid token is available.
+	if err := os.WriteFile(tokenPath, []byte("tok-789"), 0o600); err != nil {
+		t.Fatalf("rewrite token: %v", err)
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, "http://example.svc:8080/event", http.NoBody)
+	if err != nil {
+		t.Fatalf("new http request: %v", err)
+	}
+	resp, err = rt.RoundTrip(httpReq)
+	if err != nil {
+		t.Fatalf("RoundTrip http: %v", err)
+	}
+	resp.Body.Close()
+	if got := capRT.last.Header.Get("Authorization"); got != "" {
+		t.Errorf("plaintext http push set Authorization = %q, want empty", got)
 	}
 }
 

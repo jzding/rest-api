@@ -115,8 +115,13 @@ same `AuthConfig`:
   line is emitted) and the push proceeds with bearer-token auth only.
 - **Bearer token (OAuth):** when `EnableOAuth` is true and `ServiceAccountToken`
   points at a token file, every push carries an `Authorization: Bearer <token>`
-  header. The token is **re-read from disk per request** so rotated, projected
-  ServiceAccount tokens are always current.
+  header. This is wired **independently of mTLS** — an OAuth-only configuration
+  (no `EnableMTLS`) still authenticates its pushes with the token. The token is
+  **re-read from disk per request** so rotated, projected ServiceAccount tokens
+  are always current, and it is attached **only to `https` callbacks**: a
+  subscriber may register an `http://` `EndpointUri`, and the token is a cluster
+  credential that must never be sent over plaintext, so plain-http pushes are sent
+  without it (the callback can still enforce its own auth).
 - **Server verification (RootCAs):** `CACertPath` is dual-purpose — it is both the
   `ClientCAs` used to verify inbound client certs and the `RootCAs` used to verify
   the *consumer's* server certificate on the outbound push. The consumer's serving
