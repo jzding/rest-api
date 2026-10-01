@@ -95,6 +95,41 @@ This approach ensures:
 - Proper security when mTLS is enabled
 - Internal services can still perform health checks
 
+## Outbound Push Authentication
+
+The sections above describe authentication the server *enforces on inbound
+requests*. The server is also an mTLS/OAuth **client** on one leg: when a
+subscription is created it pushes an initial notification (and later state-change
+events) to the subscriber's `EndpointUri` callback. If the consumer callback
+enforces mTLS and/or OAuth, that push must authenticate too — otherwise the
+callback returns 401 and the subscription is never established.
+
+The push client (`Server.HTTPClient`, built in `InitServer`) is wired from the
+same `AuthConfig`:
+
+- **Client certificate (mTLS):** when `ClientCertPath`/`ClientKeyPath` are set and
+  resolve, the keypair is loaded into the push client's `tls.Config.Certificates`.
+  The OpenShift Service CA only mints **serverAuth** certificates, so the serving
+  cert cannot be reused here — provide a dedicated **clientAuth** keypair. If the
+  paths are empty or unreadable the client is built without a certificate (a log
+  line is emitted) and the push proceeds with bearer-token auth only.
+- **Bearer token (OAuth):** when `EnableOAuth` is true and `ServiceAccountToken`
+  points at a token file, every push carries an `Authorization: Bearer <token>`
+  header. The token is **re-read from disk per request** so rotated, projected
+  ServiceAccount tokens are always current.
+- **Server verification (RootCAs):** `CACertPath` is dual-purpose — it is both the
+  `ClientCAs` used to verify inbound client certs and the `RootCAs` used to verify
+  the *consumer's* server certificate on the outbound push. The consumer's serving
+  CA must therefore be present in that bundle.
+
+> **Networking caveat (OpenShift / OVN-Kubernetes):** when the publisher runs with
+> `hostNetwork: true` (as the PTP `linuxptp-daemon` does), its push traffic to a
+> ClusterIP consumer is SNATed to the cluster's OVN-Kubernetes **join subnet**
+> (default `100.64.0.0/16`), not a pod IP in the publisher's namespace. A consumer
+> `NetworkPolicy` that only admits the publisher namespace via `namespaceSelector`
+> will silently drop the push; add an `ipBlock` for the join subnet on the callback
+> port. See the consumer example `network-policy.yaml` in cloud-event-proxy.
+
 ## Configuration
 
 ### Authentication Configuration Structure
@@ -106,6 +141,16 @@ type AuthConfig struct {
     CACertPath     string `json:"caCertPath"`
     ServerCertPath string `json:"serverCertPath"`
     ServerKeyPath  string `json:"serverKeyPath"`
+
+    // Client certificate presented on the OUTBOUND push leg (see "Outbound Push
+    // Authentication" below). The serving cert (ServerCertPath) is serverAuth-only
+    // and cannot be reused as a client cert, so a dedicated clientAuth keypair is
+    // supplied here. Optional: when either path is empty or does not resolve, the
+    // push client is built without a client certificate and relies on the bearer
+    // token alone.
+    ClientCertPath string `json:"clientCertPath"`
+    ClientKeyPath  string `json:"clientKeyPath"`
+
     UseServiceCA   bool   `json:"useServiceCA"` // Use OpenShift Service CA (recommended for all cluster sizes)
 
     // OAuth 2.0 / bearer-token configuration. Tokens are validated by the
@@ -135,6 +180,8 @@ See `openshift-auth-config.json` for a complete configuration example that works
   "caCertPath": "/etc/cloud-event-proxy/ca-bundle/service-ca.crt",
   "serverCertPath": "/etc/cloud-event-proxy/server-certs/tls.crt",
   "serverKeyPath": "/etc/cloud-event-proxy/server-certs/tls.key",
+  "clientCertPath": "/etc/cloud-event-proxy/client-certs/tls.crt",
+  "clientKeyPath": "/etc/cloud-event-proxy/client-certs/tls.key",
   "enableOAuth": true,
   "useOpenShiftOAuth": true,
   "requiredAudiences": ["https://kubernetes.default.svc"],
