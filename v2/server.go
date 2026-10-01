@@ -505,7 +505,7 @@ func (s *Server) GetHostPath() *types.URI {
 	path := s.apiPath
 
 	if s.authConfig != nil && s.authConfig.EnableMTLS {
-		protocol = "https"
+		protocol = schemeHTTPS
 		fmt.Printf("GetHostPath: Using HTTPS protocol (authConfig.EnableMTLS=%t)\n", s.authConfig.EnableMTLS)
 	} else {
 		fmt.Printf("GetHostPath: Using HTTP protocol (authConfig=%v, EnableMTLS=%t)\n", s.authConfig != nil, s.authConfig != nil && s.authConfig.EnableMTLS)
@@ -519,7 +519,7 @@ func (s *Server) GetHostPath() *types.URI {
 func (s *Server) GetHealthPath() string {
 	protocol := "http"
 	if s.authConfig != nil && s.authConfig.EnableMTLS {
-		protocol = "https"
+		protocol = schemeHTTPS
 	}
 	return fmt.Sprintf("%s://localhost:%d%shealth", protocol, s.port, s.apiPath)
 }

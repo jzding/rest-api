@@ -28,6 +28,9 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// schemeHTTPS is the URL scheme for TLS-protected endpoints.
+const schemeHTTPS = "https"
+
 // initMTLSCACertPool initializes the CA certificate pool for mTLS
 func (s *Server) initMTLSCACertPool() error {
 	if s.authConfig == nil || !s.authConfig.EnableMTLS || s.authConfig.CACertPath == "" {
@@ -122,7 +125,7 @@ func validateEndpointURI(raw string) error {
 	if err != nil {
 		return fmt.Errorf("invalid EndpointUri %q: %v", raw, err)
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
+	if u.Scheme != "http" && u.Scheme != schemeHTTPS {
 		return fmt.Errorf("EndpointUri scheme must be http or https, got %q", u.Scheme)
 	}
 	host := u.Hostname()
@@ -214,7 +217,7 @@ type bearerTokenRoundTripper struct {
 }
 
 func (t *bearerTokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL == nil || req.URL.Scheme != "https" {
+	if req.URL == nil || req.URL.Scheme != schemeHTTPS {
 		return t.base.RoundTrip(req)
 	}
 	data, err := os.ReadFile(t.tokenPath)

@@ -61,7 +61,7 @@ func TestBearerTokenRoundTripper(t *testing.T) {
 	}
 
 	// Rotated token on disk is picked up on the next request (re-read per call).
-	if err := os.WriteFile(tokenPath, []byte("tok-456"), 0o600); err != nil {
+	if err = os.WriteFile(tokenPath, []byte("tok-456"), 0o600); err != nil {
 		t.Fatalf("rewrite token: %v", err)
 	}
 	resp, err = rt.RoundTrip(req)
@@ -86,7 +86,7 @@ func TestBearerTokenRoundTripper(t *testing.T) {
 
 	// Plaintext http callback: the token is a cluster credential and must not be
 	// sent over an unencrypted request, even when a valid token is available.
-	if err := os.WriteFile(tokenPath, []byte("tok-789"), 0o600); err != nil {
+	if err = os.WriteFile(tokenPath, []byte("tok-789"), 0o600); err != nil {
 		t.Fatalf("rewrite token: %v", err)
 	}
 	httpReq, err := http.NewRequest(http.MethodPost, "http://example.svc:8080/event", http.NoBody)
