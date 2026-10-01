@@ -17,8 +17,67 @@ package restapi
 import (
 	"crypto/tls"
 	"net"
+	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+// captureRoundTripper records the last request it saw and returns a 204.
+type captureRoundTripper struct {
+	last *http.Request
+}
+
+func (c *captureRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.last = req
+	return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Header: make(http.Header)}, nil
+}
+
+func TestBearerTokenRoundTripper(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token")
+	if err := os.WriteFile(tokenPath, []byte("  tok-123\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	cap := &captureRoundTripper{}
+	rt := &bearerTokenRoundTripper{base: cap, tokenPath: tokenPath}
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.svc:9043/event", http.NoBody)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if _, err := rt.RoundTrip(req); err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	if got := cap.last.Header.Get("Authorization"); got != "Bearer tok-123" {
+		t.Errorf("Authorization = %q, want %q", got, "Bearer tok-123")
+	}
+	// Contract: the caller's original request must not be mutated.
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Errorf("original request header mutated: %q", got)
+	}
+
+	// Rotated token on disk is picked up on the next request (re-read per call).
+	if err := os.WriteFile(tokenPath, []byte("tok-456"), 0o600); err != nil {
+		t.Fatalf("rewrite token: %v", err)
+	}
+	if _, err := rt.RoundTrip(req); err != nil {
+		t.Fatalf("RoundTrip after rotation: %v", err)
+	}
+	if got := cap.last.Header.Get("Authorization"); got != "Bearer tok-456" {
+		t.Errorf("rotated Authorization = %q, want %q", got, "Bearer tok-456")
+	}
+
+	// Missing token file: request still proceeds, no Authorization header set.
+	rtMissing := &bearerTokenRoundTripper{base: cap, tokenPath: filepath.Join(dir, "absent")}
+	if _, err := rtMissing.RoundTrip(req); err != nil {
+		t.Fatalf("RoundTrip missing token: %v", err)
+	}
+	if got := cap.last.Header.Get("Authorization"); got != "" {
+		t.Errorf("missing-token request set Authorization = %q, want empty", got)
+	}
+}
 
 func TestIsBlockedDialIP(t *testing.T) {
 	cases := []struct {
