@@ -1,480 +1,235 @@
 # Authentication Configuration for REST API
 
-This document describes how to configure mTLS (mutual TLS) and OAuth authentication for the REST API server using OpenShift's built-in Service CA and OAuth server.
+This guide describes the behavior implemented in [v2/auth.go](v2/auth.go) and
+[v2/server.go](v2/server.go). For cluster resources and mounts, see
+[OpenShift Authentication](OPENSHIFT_AUTHENTICATION.md).
 
-## Overview
+## Authentication mechanisms
 
-The REST API supports two authentication mechanisms that can be applied to specific endpoints:
+- **mTLS** (`enableMTLS`): the TLS listener verifies presented client
+  certificates against `caCertPath`. Protected HTTP handlers require a client
+  certificate for non-loopback requests.
+- **Bearer tokens** (`enableOAuth`, the existing configuration name): the
+  library calls a `TokenValidator` installed by the embedding application with
+  `Server.SetTokenValidator`. The library does not issue tokens, run an OAuth
+  login flow, parse JWTs, fetch JWKS, or include a Kubernetes client.
 
-1. **mTLS (Mutual TLS)**: Client certificate-based authentication using OpenShift Service CA
-2. **OAuth**: Bearer token-based authentication. Tokens are validated server-side via the Kubernetes **TokenReview** API, which verifies the token's issuer, signature, expiry, and audience. The REST API library itself does not parse JWTs or fetch a JWKS; it delegates verification to the cluster and only enforces the required audiences it is configured with.
+Both mechanisms are required when both are enabled. Enabling bearer-token
+authentication without installing a validator makes protected non-loopback
+requests fail with HTTP 401.
 
-Both mechanisms can be enabled independently or together for enhanced security. This unified approach works seamlessly for both single node and multi-node OpenShift clusters, providing enterprise-grade security with minimal complexity.
+cloud-event-proxy installs a Kubernetes TokenReview validator. A different
+embedding application must supply its own validator; TokenReview is not an
+automatic default of this library.
 
-### Security Guarantees
+## Token issuance versus validation
 
-- **No Authentication Bypass**: When OAuth is enabled, every non-loopback request must present a valid bearer token
-- **Server-side Token Validation**: Issuer, signature, expiry, and audience are all validated by the Kubernetes TokenReview API
-- **Audience Binding**: When `requiredAudiences` is configured, the token must be bound to one of those audiences
-- **Clear Error Messages**: Authentication failures return specific error codes without exposing sensitive information
+Projected ServiceAccount tokens are obtained through Kubernetes TokenRequest
+and mounted into pods by Kubernetes. They do not require an OpenShift OAuth
+login. OpenShift OAuth access tokens are a separate credential type obtained
+from the OpenShift OAuth server. TokenReview delegates validation of the
+presented credential to the cluster; it can handle either type if the cluster
+recognizes it and accepts the requested audiences.
 
-## Protected vs Public Endpoints
+`useOpenShiftOAuth` is retained in the configuration structure and log summary,
+but the inspected REST API and cloud-event-proxy authentication code does not
+use it to select a validator or obtain tokens. Setting it to true does not
+initiate OAuth or change validation.
 
-### Protected Endpoints (Require Authentication)
+### cloud-event-proxy TokenReview behavior
 
-When authentication is enabled, **every** data endpoint requires authentication for non-loopback requests. Only `GET /health` is exempt. (Requests originating from the pod's own loopback interface are treated as a trusted same-pod fast-path and skip authentication.)
+The implementation in cloud-event-proxy's
+[`pkg/auth/tokenreview.go`](https://github.com/redhat-cne/cloud-event-proxy/blob/main/pkg/auth/tokenreview.go)
+uses in-cluster Kubernetes credentials, or `KUBECONFIG` when set:
 
-#### Subscription Management
-- `POST /subscriptions` - Create subscription
-- `GET /subscriptions` - List all subscriptions
-- `GET /subscriptions/{subscriptionId}` - Get subscription details
-- `DELETE /subscriptions/{subscriptionId}` - Delete specific subscription
-- `DELETE /subscriptions` - Delete all subscriptions
-- `PUT /subscriptions/status/{subscriptionId}` - Ping for subscription status
+1. Submit the bearer token and `requiredAudiences` in a TokenReview on a cache miss.
+2. Reject API errors, a nonempty review error, or `status.authenticated: false`.
+3. When audiences were requested, also reject an empty returned audience list.
+   The implementation relies on the API server to return the valid intersection.
+4. Return the authenticated username, UID, groups, and audiences.
 
-#### Publisher Management
-- `POST /publishers` - Create publisher
-- `GET /publishers` - List all publishers
-- `GET /publishers/{publisherid}` - Get publisher details
-- `DELETE /publishers/{publisherid}` - Delete specific publisher
-- `DELETE /publishers` - Delete all publishers
+For projected ServiceAccount JWTs, the cluster validates signature, issuer,
+expiry and audience, as well as applicable object bindings. Opaque OAuth tokens
+are authenticated through the cluster's configured token authentication path;
+they need not be locally verifiable JWTs.
 
-#### Event Management
-- `POST /create/event` - Publish event
-- `POST /log` - Log event
-- `GET /{ResourceAddress}/CurrentState` - Get current state
+Successful results are cached for 30 seconds, with at most 4096 entries. Cache
+keys include the token hash and requested audiences. Revocation or expiration
+after a successful review may therefore take up to the remaining cache TTL to
+be observed. This cache belongs to cloud-event-proxy, not this library.
 
-#### Test Endpoints
-- `POST /dummy` - Test endpoint
-- `POST /dummy2` - Test endpoint
+`requiredAudiences` expresses acceptable recipients, not OAuth scopes or
+permissions. Use a dedicated service audience when isolation is needed; sharing
+the Kubernetes API audience does not bind the token uniquely to this service.
+The library forwards this setting to the validator rather than checking token
+claims locally.
 
-### Public Endpoints (No Authentication Required)
+## Request enforcement and health
 
-Only the health endpoint is reachable without authentication:
+All paths below are relative to the configured API prefix, normally
+`/api/ocloudNotifications/v2`.
 
-- `GET /health` - Service health check (see the special mTLS behavior below)
+| Routes | Non-loopback requests |
+| --- | --- |
+| Subscription create, read, delete, and status ping | Require each enabled authentication mechanism |
+| Publisher create, read, and delete | Require each enabled authentication mechanism |
+| CurrentState, create/event, log, dummy, dummy2 | Require each enabled authentication mechanism |
+| `GET /health` | No bearer token or client certificate required |
 
-### Health Endpoint Behavior
+The middleware trusts requests whose remote address is loopback and skips its
+authentication checks. That exemption is based on the connection's remote
+address, not the Host header. With host networking, loopback represents the
+node's network namespace rather than an isolated pod namespace. Account for
+that trust boundary when deploying or placing a proxy in front of the server.
 
-The `/health` endpoint has special behavior based on authentication configuration:
+### Listener modes
 
-#### When Authentication is Disabled
-- Accessible via HTTP without any authentication
-- Simple health check for service availability
+| enableMTLS | enableOAuth | Listener and protected request requirements |
+| --- | --- | --- |
+| false | false | HTTP; no authentication |
+| false | true | HTTP; bearer token |
+| true | false | HTTPS; client certificate |
+| true | true | HTTPS; client certificate and bearer token |
 
-#### When mTLS is Enabled
-- Accessible via HTTPS only
-- **Requires a valid client certificate** for access
-- Used by internal services (like PTP daemon) for health checks
-- Service CA certificate is required for internal health checks
+Bearer-token authentication alone does not enable TLS on this listener.
+Provide an appropriately secured transport if using that mode across a network;
+also account for the loopback exemption when forwarding traffic.
 
-**Note**: Even though the `/health` endpoint is considered "public" in terms of business logic, when mTLS is enabled, it still requires proper certificate authentication for security reasons.
-
-## Server Architecture
-
-### Single Server with Conditional Authentication
-
-The REST API uses a single server architecture that adapts based on authentication configuration:
-
-1. **No Authentication**: Server runs on HTTP, all endpoints accessible without authentication
-2. **mTLS Only**: Server runs on HTTPS with client certificate validation
-3. **OAuth Only**: Server runs on HTTP with Bearer token validation
-4. **Both mTLS and OAuth**: Server runs on HTTPS with both client certificate and Bearer token validation
-
-### Health Endpoint Implementation
-
-The `/health` endpoint is always included in the main server but behaves differently based on authentication:
-
-- **Without mTLS**: Accessible via HTTP without authentication
-- **With mTLS**: Accessible via HTTPS but requires valid client certificate
-- **Internal health checks** (like PTP daemon) use the service CA certificate for authentication
-
-This approach ensures:
-- Consistent server architecture
-- No port conflicts
-- Proper security when mTLS is enabled
-- Internal services can still perform health checks
-
-## Outbound Push Authentication
-
-The sections above describe authentication the server *enforces on inbound
-requests*. The server is also an mTLS/OAuth **client** on one leg: when a
-subscription is created it pushes an initial notification (and later state-change
-events) to the subscriber's `EndpointUri` callback. If the consumer callback
-enforces mTLS and/or OAuth, that push must authenticate too — otherwise the
-callback returns 401 and the subscription is never established.
-
-The push client (`Server.HTTPClient`, built in `InitServer`) is wired from the
-same `AuthConfig`:
-
-- **Client certificate (mTLS):** when `ClientCertPath`/`ClientKeyPath` are set and
-  resolve, the keypair is loaded into the push client's `tls.Config.Certificates`.
-  The OpenShift Service CA only mints **serverAuth** certificates, so the serving
-  cert cannot be reused here — provide a dedicated **clientAuth** keypair. If the
-  paths are empty or unreadable the client is built without a certificate (a log
-  line is emitted) and the push proceeds with bearer-token auth only.
-- **Bearer token (OAuth):** when `EnableOAuth` is true and `ServiceAccountToken`
-  points at a token file, every push carries an `Authorization: Bearer <token>`
-  header. This is wired **independently of mTLS** — an OAuth-only configuration
-  (no `EnableMTLS`) still authenticates its pushes with the token. The token is
-  **re-read from disk per request** so rotated, projected ServiceAccount tokens
-  are always current, and it is attached **only to `https` callbacks**: a
-  subscriber may register an `http://` `EndpointUri`, and the token is a cluster
-  credential that must never be sent over plaintext, so plain-http pushes are sent
-  without it (the callback can still enforce its own auth).
-- **Server verification (RootCAs):** `CACertPath` is dual-purpose — it is both the
-  `ClientCAs` used to verify inbound client certs and the `RootCAs` used to verify
-  the *consumer's* server certificate on the outbound push. The consumer's serving
-  CA must therefore be present in that bundle.
-
-> **Networking caveat (OpenShift / OVN-Kubernetes):** when the publisher runs with
-> `hostNetwork: true` (as the PTP `linuxptp-daemon` does), its push traffic to a
-> ClusterIP consumer is SNATed to the cluster's OVN-Kubernetes **join subnet**
-> (default `100.64.0.0/16`), not a pod IP in the publisher's namespace. A consumer
-> `NetworkPolicy` that only admits the publisher namespace via `namespaceSelector`
-> will silently drop the push; add an `ipBlock` for the join subnet on the callback
-> port. See the consumer example `network-policy.yaml` in cloud-event-proxy.
+With mTLS enabled, the TLS listener uses `VerifyClientCertIfGiven`: no client
+certificate is needed to reach health, but any certificate that is presented
+must still pass TLS verification. Protected handlers enforce the certificate
+requirement after the handshake. HTTPS health callers must trust the server
+certificate and use a hostname matching it. The internal `EndPointHealthChk`
+helper uses a separate localhost HTTPS client that skips server verification;
+this is not the behavior of the outbound push client.
 
 ## Configuration
 
-### Authentication Configuration Structure
+The fields below are defined by `AuthConfig` in [v2/server.go](v2/server.go).
 
-```go
-type AuthConfig struct {
-    // mTLS configuration - works for both single and multi-node clusters
-    EnableMTLS     bool   `json:"enableMTLS"`
-    CACertPath     string `json:"caCertPath"`
-    ServerCertPath string `json:"serverCertPath"`
-    ServerKeyPath  string `json:"serverKeyPath"`
+| JSON field | Implemented behavior |
+| --- | --- |
+| `enableMTLS` | Enable the TLS listener and require client certificates on protected non-loopback requests |
+| `caCertPath` | PEM trust bundle for inbound client certificates and, with mTLS enabled, outbound callback server certificates |
+| `serverCertPath`, `serverKeyPath` | Serving certificate and private key |
+| `clientCertPath`, `clientKeyPath` | Optional client keypair loaded by the mTLS outbound HTTP client |
+| `enableOAuth` | Require bearer-token validation and enable token-file injection for outbound HTTPS requests |
+| `requiredAudiences` | Audience list passed to the installed validator |
+| `serviceAccountToken` | Token-file path used for outbound requests; not the inbound validator's Kubernetes client credentials |
+| `serviceAccountName` | Descriptive configuration; does not select the pod identity or authorize callers |
+| `useOpenShiftOAuth` | Retained flag with no token acquisition or validator selection behavior |
+| `useServiceCA` | Retained flag; the library uses the configured file paths and does not provision certificates |
+| `tlsMinVersion`, `tlsCipherSuites` | TLS profile values supplied by the embedding application/operator |
 
-    // Client certificate presented on the OUTBOUND push leg (see "Outbound Push
-    // Authentication" below). The serving cert (ServerCertPath) is serverAuth-only
-    // and cannot be reused as a client cert, so a dedicated clientAuth keypair is
-    // supplied here. Optional: when either path is empty or does not resolve, the
-    // push client is built without a client certificate and relies on the bearer
-    // token alone.
-    ClientCertPath string `json:"clientCertPath"`
-    ClientKeyPath  string `json:"clientKeyPath"`
+The TLS profile helper defaults to TLS 1.2 when no recognized minimum is supplied
+and the TLS configuration has no minimum. Unknown cipher names and TLS 1.3
+cipher names are ignored by its configurable cipher-suite mapping. The library
+does not itself watch cluster TLS profile resources.
 
-    UseServiceCA   bool   `json:"useServiceCA"` // Use OpenShift Service CA (recommended for all cluster sizes)
-
-    // OAuth 2.0 / bearer-token configuration. Tokens are validated by the
-    // TokenValidator installed via Server.SetTokenValidator (cloud-event-proxy
-    // uses the Kubernetes TokenReview API), so no issuer/JWKS is configured here.
-    EnableOAuth         bool     `json:"enableOAuth"`
-    RequiredAudiences   []string `json:"requiredAudiences"`   // Required token audiences (validated by TokenReview)
-    ServiceAccountName  string   `json:"serviceAccountName"`  // ServiceAccount used by clients for authentication
-    ServiceAccountToken string   `json:"serviceAccountToken"` // ServiceAccount token path (client side)
-    UseOpenShiftOAuth   bool     `json:"useOpenShiftOAuth"`   // Client hint: obtain tokens from OpenShift OAuth
-
-    // TLS profile - centrally managed by the cluster's TLSSecurityProfile and
-    // propagated by the operator. Nothing is hardcoded in this library.
-    TLSMinVersion   string   `json:"tlsMinVersion"`   // e.g. "VersionTLS12", "VersionTLS13"
-    TLSCipherSuites []string `json:"tlsCipherSuites"` // IANA cipher suite names
-}
-```
-
-### Example Configuration
-
-See `openshift-auth-config.json` for a complete configuration example that works for both single node and multi-node clusters:
+Example with certificates and an explicitly projected service token:
 
 ```json
 {
   "enableMTLS": true,
-  "useServiceCA": true,
-  "caCertPath": "/etc/cloud-event-proxy/ca-bundle/service-ca.crt",
+  "caCertPath": "/etc/cloud-event-proxy/trust/ca-bundle.crt",
   "serverCertPath": "/etc/cloud-event-proxy/server-certs/tls.crt",
   "serverKeyPath": "/etc/cloud-event-proxy/server-certs/tls.key",
   "clientCertPath": "/etc/cloud-event-proxy/client-certs/tls.crt",
   "clientKeyPath": "/etc/cloud-event-proxy/client-certs/tls.key",
   "enableOAuth": true,
-  "useOpenShiftOAuth": true,
-  "requiredAudiences": ["https://kubernetes.default.svc"],
-  "serviceAccountName": "cloud-event-proxy-sa",
-  "serviceAccountToken": "/var/run/secrets/kubernetes.io/serviceaccount/token"
+  "requiredAudiences": ["cloud-event-proxy"],
+  "serviceAccountToken": "/var/run/secrets/cloud-event-proxy/token"
 }
 ```
 
-> **Note:** There is no `oauthIssuer`, `oauthJWKSURL`, `requiredScopes`, or `requiredAudience` (singular) field. Token issuer, signature, and expiry are validated by the Kubernetes TokenReview API. The only OAuth policy this library enforces locally is `requiredAudiences` (an array): the presented token must be bound to one of the listed audiences.
+The audience `cloud-event-proxy` is an example deployment choice. Clients must
+request tokens for that audience. For outbound pushes, the receiving callback
+must accept the audience of the token in `serviceAccountToken`.
 
-## OpenShift Integration
+There are no `oauthIssuer`, `oauthJWKSURL`, `requiredScopes`, or singular
+`requiredAudience` fields.
 
-### Service CA (Recommended)
+## Certificates and trust
 
-OpenShift's Service CA provides automatic certificate management for both single node and multi-node clusters:
+The server refuses to start in mTLS mode without a usable CA pool or serving
+keypair. A trusted client certificate is required on protected non-loopback
+requests, but the middleware does not map its subject to endpoint permissions.
 
-#### Prerequisites
-- OpenShift cluster (single node or multi-node)
-- No additional operators required
+OpenShift Service CA can provide the serving certificate. It does not provide
+the separate clientAuth certificate needed by an mTLS client. Provision that
+keypair through your client-certificate issuer and include its issuer in the
+server's trust bundle. A serving certificate cannot be reused as a client
+certificate merely because it is signed by a trusted CA.
 
-#### Certificate Resources
-- **Service**: Annotated with `service.beta.openshift.io/serving-cert-secret-name` for automatic certificate generation
-- **Secret**: Automatically created by Service CA with server certificates
+For outbound HTTPS with mTLS enabled, `caCertPath` is also the trust store for
+callback servers. If client and serving certificates use different issuers,
+include both CA chains. The code loads certificates and CA bundles during
+initialization/startup; it does not watch those files for rotation. Arrange
+reload/restart when certificate material changes.
 
-#### Example Service CA Configuration
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: ptp-event-publisher-service
-  namespace: openshift-ptp
-  annotations:
-    service.beta.openshift.io/serving-cert-secret-name: cloud-event-proxy-tls
-spec:
-  selector:
-    app: linuxptp-daemon
-  ports:
-  - port: 9043
-    targetPort: 9043
-  type: ClusterIP
-```
+## Outbound Push Authentication
 
-### OpenShift OAuth / TokenReview
+`Server.HTTPClient` is used for initial subscription notifications and
+publisher endpoint validation. Do not assume every event delivery performed by
+other packages uses this client; those senders need their own configuration.
 
-The OAuth implementation validates bearer tokens through the Kubernetes TokenReview API:
+- With `enableMTLS`, the client loads `clientCertPath` and `clientKeyPath`
+  when provided. A load failure is logged and the request proceeds without a
+  client certificate; a callback requiring mTLS will reject it.
+- With `enableOAuth` and a nonempty `serviceAccountToken` path, the transport
+  reads the token file on each HTTPS request and attaches a Bearer header.
+  This also works when mTLS is disabled. A missing/empty token leaves the
+  request without that injected header.
+- Tokens are not attached to HTTP callbacks. Without mTLS, outbound HTTPS uses
+  the transport's default TLS trust rather than `caCertPath`.
+- The client rejects redirects and uses a dialer that checks resolved addresses
+  before connecting. Link-local, metadata, multicast, and unspecified addresses
+  are blocked; private and loopback addresses are allowed intentionally.
 
-#### Prerequisites
-- OpenShift cluster (single node or multi-node)
-- The server's ServiceAccount must be permitted to create `tokenreviews` (via the `system:auth-delegator` ClusterRole or an equivalent binding)
-- No additional operators required
+For host-networked publishers, check the actual source address seen by the
+consumer when designing NetworkPolicy rules. Namespace selectors alone may not
+cover host or SNATed traffic.
 
-#### OAuth Configuration
-- **Token Validation**: The server calls the Kubernetes TokenReview API, which verifies issuer, signature, expiry, and audience server-side
-- **ServiceAccount Tokens**: Clients present a projected ServiceAccount token bound to the required audience
-- **Audience Binding**: `requiredAudiences` enforces that the token was minted for this service
-- **RBAC**: The server SA needs `create` on `authentication.k8s.io/tokenreviews`
+## Client examples
 
-#### Example ServiceAccount Configuration
-```yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: cloud-event-proxy-client
-  namespace: openshift-ptp
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  namespace: openshift-ptp
-  name: cloud-event-proxy-oauth
-rules:
-- apiGroups: [""]
-  resources: ["serviceaccounts"]
-  verbs: ["get", "list"]
-- apiGroups: ["authentication.k8s.io"]
-  resources: ["tokenreviews"]
-  verbs: ["create"]
-- apiGroups: ["authorization.k8s.io"]
-  resources: ["subjectaccessreviews"]
-  verbs: ["create"]
-```
-
-## mTLS Configuration
-
-### Certificate Requirements
-
-1. **CA Certificate** (`caCertPath`): The Certificate Authority certificate used to validate client certificates
-2. **Server Certificate** (`serverCertPath`): The server's TLS certificate
-3. **Server Private Key** (`serverKeyPath`): The server's private key
-
-### Certificate Generation Example
+Run these from a separate client pod with the appropriate certificates and
+projected token mounted. Using localhost would exercise the loopback exemption
+and may not match the serving certificate's DNS names.
 
 ```bash
-# Generate CA private key
-openssl genrsa -out ca.key 4096
+API=https://ptp-event-publisher-service.openshift-ptp.svc:9043/api/ocloudNotifications/v2
 
-# Generate CA certificate
-openssl req -new -x509 -key ca.key -sha256 -subj "/C=US/ST=CA/O=MyOrg/CN=MyCA" -days 3650 -out ca.crt
+# Protected read: both mechanisms enabled.
+curl --cacert service-ca.crt --cert client.crt --key client.key \
+  -H "Authorization: Bearer $(cat /var/run/secrets/cloud-event-proxy/token)" \
+  "$API/subscriptions"
 
-# Generate server private key
-openssl genrsa -out server.key 4096
-
-# Generate server certificate signing request
-openssl req -new -key server.key -out server.csr -subj "/C=US/ST=CA/O=MyOrg/CN=localhost"
-
-# Generate server certificate signed by CA
-openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 365 -sha256
-
-# Generate client private key
-openssl genrsa -out client.key 4096
-
-# Generate client certificate signing request
-openssl req -new -key client.key -out client.csr -subj "/C=US/ST=CA/O=MyOrg/CN=client"
-
-# Generate client certificate signed by CA
-openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out client.crt -days 365 -sha256
-```
-
-## Client Examples
-
-### Protected Endpoint Examples
-
-#### Create Subscription (with both mTLS and OAuth)
-
-```bash
-# With both mTLS and OAuth
-curl -X POST https://localhost:9043/api/ocloudNotifications/v2/subscriptions \
-  --cert client.crt \
-  --key client.key \
-  --cacert ca.crt \
-  -H "Authorization: Bearer valid_your_jwt_token_here" \
+# Protected write; callback must be reachable and accept the producer's credentials.
+curl --cacert service-ca.crt --cert client.crt --key client.key \
+  -H "Authorization: Bearer $(cat /var/run/secrets/cloud-event-proxy/token)" \
   -H "Content-Type: application/json" \
-  -d '{"EndpointUri": "http://example.com/callback", "ResourceAddress": "/test/resource"}'
+  -d '{"EndpointUri":"https://event-consumer.openshift-ptp.svc:9043/callback","ResourceAddress":"/test/resource"}' \
+  "$API/subscriptions"
 
-# With only mTLS (if OAuth is disabled)
-curl -X POST https://localhost:9043/api/ocloudNotifications/v2/subscriptions \
-  --cert client.crt \
-  --key client.key \
-  --cacert ca.crt \
-  -H "Content-Type: application/json" \
-  -d '{"EndpointUri": "http://example.com/callback", "ResourceAddress": "/test/resource"}'
-
-# With only OAuth (if mTLS is disabled)
-curl -X POST http://localhost:9043/api/ocloudNotifications/v2/subscriptions \
-  -H "Authorization: Bearer valid_your_jwt_token_here" \
-  -H "Content-Type: application/json" \
-  -d '{"EndpointUri": "http://example.com/callback", "ResourceAddress": "/test/resource"}'
+# Health needs server trust, but no client certificate or bearer token.
+curl --cacert service-ca.crt "$API/health"
 ```
 
-#### Delete Publisher (with both mTLS and OAuth)
+Do not enable shell tracing or log token values when running authenticated
+commands. With bearer authentication disabled, omit the Authorization header;
+with all authentication disabled, the listener uses HTTP.
 
-```bash
-curl -X DELETE https://localhost:9043/api/ocloudNotifications/v2/publishers/publisher-id \
-  --cert client.crt \
-  --key client.key \
-  --cacert ca.crt \
-  -H "Authorization: Bearer valid_your_jwt_token_here"
-```
+## Authorization and operation
 
-### Read (GET) Endpoint Examples
+Authentication confirms a credential is accepted. The REST API middleware
+does not enforce OAuth scopes, perform SubjectAccessReview, or apply
+per-user/per-ServiceAccount endpoint RBAC. TokenReview permissions authorize the
+server to call Kubernetes; they do not restrict which authenticated callers may
+use this REST API. Apply any additional authorization in the embedding
+application or a deliberately configured access layer.
 
-`GET` endpoints are protected too - when authentication is enabled they require the same mTLS client certificate and/or bearer token as the write endpoints.
-
-#### List Subscriptions
-
-```bash
-# With both mTLS and OAuth
-curl -X GET https://localhost:9043/api/ocloudNotifications/v2/subscriptions \
-  --cert client.crt \
-  --key client.key \
-  --cacert ca.crt \
-  -H "Authorization: Bearer valid_your_token_here"
-
-# When authentication is disabled (plain HTTP, no auth)
-curl -X GET http://localhost:9043/api/ocloudNotifications/v2/subscriptions
-```
-
-#### Health Check
-
-```bash
-# When mTLS is enabled (requires client certificate)
-curl -X GET https://localhost:9043/api/ocloudNotifications/v2/health \
-  --cert client.crt \
-  --key client.key \
-  --cacert ca.crt
-
-# When mTLS is disabled (no authentication required)
-curl -X GET http://localhost:9043/api/ocloudNotifications/v2/health
-
-# Internal health check (for services like PTP daemon)
-curl -X GET https://localhost:9043/api/ocloudNotifications/v2/health \
-  --cacert /etc/cloud-event-proxy/ca-bundle/service-ca.crt
-```
-
-## OAuth Security Implementation
-
-### Validation via Kubernetes TokenReview
-
-The OAuth implementation delegates all cryptographic token validation to the Kubernetes TokenReview API. The following checks are performed server-side by the cluster:
-
-1. **Issuer & Signature Validation**:
-   - The token's issuer and signature are verified by the cluster; tokens the API server does not recognize are rejected.
-   - No bypass mechanisms or fallbacks.
-
-2. **Expiration Checking**:
-   ```
-   Token expired
-   ```
-   - Expired tokens are rejected by TokenReview.
-
-3. **Audience Validation**:
-   ```
-   Token audience validation failed
-   ```
-   - When `requiredAudiences` is set, the token must be bound to one of those audiences.
-   - Prevents token misuse across different services.
-
-4. **Missing Token Handling**:
-   ```
-   Authorization header required
-   Bearer token required
-   ```
-   - Clear error messages for missing or malformed tokens.
-   - Proper HTTP status codes (401 Unauthorized).
-
-### Security Properties
-
-- **No local JWT parsing / JWKS fetching**: verification is performed by the Kubernetes API server via TokenReview.
-- **Bounded token cache**: validated results are cached briefly with a short TTL to bound TokenReview load.
-- **Memory Safety**: tokens are never logged or otherwise exposed.
-
-## Security Considerations
-
-1. **Certificate Management**
-   - Implement proper certificate rotation
-   - Use secure storage for private keys
-   - Use OpenShift Service CA for automated certificate management
-
-2. **OAuth Security**
-   - **Server-side Validation**: All tokens are validated by the Kubernetes TokenReview API (issuer, signature, expiry, audience)
-   - **No Bypass Mechanisms**: Non-loopback requests without a valid token are rejected with 401
-   - **Audience Binding**: Configure `requiredAudiences` so tokens minted for other services are rejected
-   - A short-TTL cache bounds TokenReview load without weakening validation
-
-3. **TLS Configuration**
-   - Use TLS 1.2 or higher
-   - Configure secure cipher suites
-   - Enable HTTP/2 when possible
-
-4. **Access Control**
-   - Monitor and log authentication failures
-   - Implement rate limiting
-   - Consider IP whitelisting for sensitive endpoints
-
-5. **Error Handling**
-   - Use generic error messages in production
-   - Don't expose internal details in error responses
-   - Log detailed errors server-side
-
-6. **Health Endpoint Security**
-   - When mTLS is enabled, health endpoint requires client certificates
-   - Internal services should use service CA certificates for health checks
-   - External health checks require proper client certificates
-   - Consider network policies to restrict health endpoint access
-
-## Production Recommendations
-
-1. **Authentication Infrastructure**
-   - Use a proper OAuth 2.0 server (e.g., Keycloak, Auth0)
-   - Implement a certificate management solution
-   - Consider using a service mesh for mTLS
-
-2. **Monitoring and Logging**
-   - Log all authentication events
-   - Monitor authentication failures
-   - Set up alerts for suspicious activity
-
-3. **Security Hardening**
-   - Use hardware security modules (HSMs) for key storage
-   - Implement certificate revocation checking
-   - Regular security audits and penetration testing
-
-4. **Performance Optimization**
-   - Implement token caching
-   - Use connection pooling
-   - Configure appropriate timeouts
-
-5. **Operational Considerations**
-   - Document certificate rotation procedures
-   - Create incident response plans
-   - Regular security training for team members
+For TokenReview RBAC, projected-token mounts, and Service CA resources, use the
+[OpenShift deployment examples](OPENSHIFT_AUTHENTICATION.md#deployment-resources).
+Monitor TokenReview errors, API-server reachability, certificate expiry, and
+callback authentication failures. An API-server outage causes validation failures
+on cache misses; a cached successful result can remain usable until its TTL ends.
