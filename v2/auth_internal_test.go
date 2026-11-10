@@ -205,3 +205,18 @@ func TestApplyTLSProfile(t *testing.T) {
 	var nilCfg *AuthConfig
 	nilCfg.ApplyTLSProfile(&tls.Config{}) //nolint:gosec // nil-receiver no-op path under test
 }
+
+func TestOAuthOnlyUsesHTTPSPaths(t *testing.T) {
+	s := &Server{
+		port:       9043,
+		apiPath:    "/api/ocloudNotifications/v1/",
+		authConfig: &AuthConfig{EnableOAuth: true},
+	}
+
+	if got := s.GetHostPath().String(); got != "https://localhost:9043/api/ocloudNotifications/v1/" {
+		t.Fatalf("GetHostPath() = %q, want HTTPS", got)
+	}
+	if got := s.GetHealthPath(); got != "https://localhost:9043/api/ocloudNotifications/v1/health" {
+		t.Fatalf("GetHealthPath() = %q, want HTTPS", got)
+	}
+}
